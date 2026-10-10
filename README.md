@@ -40,14 +40,15 @@ let response = try await session.translate("Hello, world.")
 
 ### Homebrew（推荐）
 
+公式就在主仓库里，不用另开一个 tap 仓库。**第二行的 `brew trust` 别漏** —— Homebrew 7 起，第三方 tap 必须先显式信任，否则它会直接拒绝加载公式（`Error: Refusing to load formula ... from untrusted tap`）：
+
 ```bash
-# 公式在 homebrew-apple-translate-api 这个 tap 仓库里
-brew tap BreakFree003/apple-translate-api
+brew tap BreakFree003/apple-translate-api https://github.com/BreakFree003/apple-translate-api
+brew trust breakfree003/apple-translate-api
 brew install apple-translate-api
 ```
 
-（不想再开一个仓库的话，也可以直接 tap 主仓库：
-`brew tap BreakFree003/apple-translate-api https://github.com/BreakFree003/apple-translate-api` —— 显式给 URL 就不要求仓库名带 `homebrew-` 前缀。）
+（也可以另开一个 `homebrew-apple-translate-api` 仓库放公式，那样第一行不用带 URL；但 `brew trust` 这步一样跑不掉。）
 
 当后台服务跑 —— launchd 托管，登录后自动起、崩了自动拉起来：
 
