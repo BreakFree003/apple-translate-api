@@ -133,7 +133,7 @@ pkcs12 PKCS#12 Data Management.                                    → pl 0.953
 | 模式 | 行为 | 适合 |
 |---|---|---|
 | `auto` | 检测器说了算，判错就 400 | 真要区分语种 |
-| `english` | 除请求里显式指定的，一律当 `AT_DEFAULT_SOURCE` | 内容 99% 是英文，不想为判错买单 |
+| `english` | 除请求里显式指定的，一律当 `AT_DEFAULT_SOURCE` | 内容 99% 是英文、不想为判错买单 —— **整页翻译首选**，见「配置到沉浸式翻译」 |
 | `retry` | 先按检测结果试；**没装包**就用 `AT_DEFAULT_SOURCE` 再试一次 | 推荐（**代码默认仍是 `auto`**）：装了的语种照常识别，没装的不再白白失败。整页翻译务必用它，见「配置到沉浸式翻译」 |
 
 `retry` 实测：上面那 20 条原本必然 400 的句子，**20/20 都返回了正常译文**（日志里留下 `source pt has no pack, retrying as en`）。
@@ -237,8 +237,10 @@ print(client.chat.completions.create(
 
 几件要知道的事：
 
-- **先把 `AT_SOURCE_MODE` 设成 `retry`**（代码默认是 `auto`，见下）。整页翻译几乎全是短句，而检测器会**自信地**把英文短句判成别的语言 —— 实测 `-m num, --max-count=num Stop reading the file after num matches.` 判成 `pt 0.994`（英语只有 0.005）。那个语言包没装 → 整条 400，页面上就是一片没翻出来。`retry` 的规则是「检测到的语种没装包就按 `AT_DEFAULT_SOURCE` 再试一次」，这类句子实测 20/20 都能正常翻出来。
-  **代价也要知道**：如果正文**真的**是没装包的外语（比如整页葡萄牙语），`retry` 会拿英语去翻它，可能翻出胡话；`auto` 则会明确报 400 让你去装包。内容以英文为主就用 `retry`，混杂多语种就用 `auto`。
+- **先把 `AT_SOURCE_MODE` 设好**，别用默认的 `auto`。整页翻译几乎全是短句，而检测器会**自信地**把英文短句判成别的语言 —— 实测 `-m num, --max-count=num Stop reading the file after num matches.` 判成 `pt 0.994`（英语只有 0.005）。那个语言包没装 → 整条 400，页面上就是一片没翻出来。
+  - **内容 99% 是英文 → `AT_SOURCE_MODE=english`**：完全不做检测，一律按 `AT_DEFAULT_SOURCE`（默认 `en`）翻。确定、可预测，上面那类误判一律消失（实测：那句被判成 pt 的英文 → 200 正常翻出）。代价是正文里真的混进外语时会拿英语去翻它 —— 实测一段葡萄牙语基本原样返回（只换了标点），无用但不会翻成胡话。
+  - **多语种混杂 → `retry`**：先按检测结果试，检测到的语种没装包才回退到 en，比 `english` 聪明；但英文短句被误判成**已经装包**的语种时会静默翻错。这类句子实测 20/20 都能正常翻出来。
+  - 请求里显式给的 `source` 两者都不会覆盖（实测 `source: "ja"` 在 `english` 模式下照样按 ja 走，没装包就 400）。
 - **地址要写全 `/v1/chat/completions`**，别只写 `http://127.0.0.1:8787`。旧版本扩展（Firefox 商店曾分发的 1.30.2）对只填主机名的写法会拼成 `/chat/completions`，直接 404；写全路径各版本都对。
 - **模型名填什么都行**：本服务不读请求里的 `model` 字段，响应里一律回 `AT_MODEL`。扩展爱发的 `temperature` / `max_tokens` / `top_p` 也一律忽略 —— JSON 里多出来的键不会让请求失败。
 - **目标语言是扩展写在 prompt 里、由本服务认出来的**（`Translate into Chinese…` / `翻译成中文：`），所以 `AT_DEFAULT_TARGET` 基本用不上。但扩展里选的目标语言如果本地**没装那个语言包**，会回 400 `language_not_installed`，装法见[语言包在哪装](#语言包在哪装)。
