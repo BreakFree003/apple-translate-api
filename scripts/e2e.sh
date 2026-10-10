@@ -10,10 +10,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PORT="${E2E_PORT:-8791}"
-BIN="$(swift build --show-bin-path)/apple-translate-server"
+CONFIG="${E2E_CONFIG:-debug}"
 
-echo "▶ 构建"
-swift build
+# 默认测源码构建产物。要验 brew（或别处）装的那个二进制，就覆盖 AT_BIN：
+#   AT_BIN=/opt/homebrew/bin/apple-translate-server ./scripts/e2e.sh
+if [ -n "${AT_BIN:-}" ]; then
+    BIN="$AT_BIN"
+    echo "▶ 用 AT_BIN 指定的二进制：$BIN"
+else
+    # 变量一律用 ${} 包起来：后面紧跟全角标点时，bash 会把标点的字节吃进变量名。
+    echo "▶ 构建（${CONFIG}）"
+    swift build -c "$CONFIG"
+    BIN="$(swift build -c "$CONFIG" --show-bin-path)/apple-translate-server"
+fi
+
+if [ ! -x "$BIN" ]; then
+    echo "找不到可执行文件：$BIN" >&2
+    exit 1
+fi
 
 LOG="$(mktemp -t apple-translate-e2e)"
 echo "▶ 在端口 ${PORT} 起服务（日志：${LOG}）"

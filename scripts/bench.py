@@ -20,13 +20,15 @@ import urllib.request
 BASE = "http://127.0.0.1:8787"
 
 
-def find_pid() -> int:
+def find_pid(pattern: str) -> int:
     out = subprocess.run(
-        ["pgrep", "-f", "Products/Release/apple-translate-server"],
+        ["pgrep", "-f", pattern],
         capture_output=True, text=True,
     ).stdout.split()
     if not out:
-        sys.exit("找不到服务进程，先确认服务在跑")
+        sys.exit(f"找不到匹配 {pattern!r} 的服务进程，先确认服务在跑（或用 --pid 指定）")
+    if len(out) > 1:
+        print(f"⚠️  {pattern!r} 匹配到多个进程 {out}，用第一个 {out[0]}（可用 --pid 指定）")
     return int(out[0])
 
 
@@ -78,10 +80,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--burst", type=int, default=200, help="burst 阶段的请求数")
     parser.add_argument("--base", default=BASE)
+    # 默认只按二进制名匹配，不再写死 "Products/Release/" —— brew 装的是
+    # /opt/homebrew/opt/apple-translate-api/bin/apple-translate-server，路径里没这一段。
+    parser.add_argument("--match", default="apple-translate-server", help="pgrep -f 的匹配模式")
+    parser.add_argument("--pid", type=int, help="直接指定服务进程号")
     args = parser.parse_args()
     BASE = args.base
 
-    pid = find_pid()
+    pid = args.pid if args.pid else find_pid(args.match)
     print(f"▶ 目标进程 pid={pid}  服务 {BASE}")
     print(f"▶ 空载基线")
     mark = report("idle", pid, (0.0, 0.0))

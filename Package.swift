@@ -15,6 +15,13 @@ let package = Package(
         .executableTarget(
             name: "AppleTranslateServer",
             path: "Sources/AppleTranslateServer"
+        ),
+        // 只测纯逻辑（HTTP 解析、prompt 切分、语言目录、配置）。
+        // 真正的翻译依赖本机装了哪些语言包，进不了单测 —— 那些归 scripts/e2e.sh。
+        .testTarget(
+            name: "AppleTranslateServerTests",
+            dependencies: ["AppleTranslateServer"],
+            path: "Tests/AppleTranslateServerTests"
         )
     ]
 )

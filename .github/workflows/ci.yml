@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    # 需要 macOS 26+：Translation 框架的 TranslationSession(installedSource:target:)
+    # 从 macOS 26 起才有，包本身也声明了 .macOS("26.0")。
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 工具链信息
+        run: swift --version && sw_vers
+
+      - name: 构建
+        run: swift build -c release
+
+      - name: 单元测试（只测纯逻辑，不依赖语言包）
+        run: swift test
+
+      - name: CLI 自检
+        run: |
+          BIN="$(swift build -c release --show-bin-path)/apple-translate-server"
+          "$BIN" --version
+          "$BIN" --help
+          # 端口没被占时服务必须能起来并响应 /health（不碰翻译，不需要语言包）。
+          "$BIN" > /tmp/server.log 2>&1 &
+          for _ in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:8787/health && break
+            sleep 0.25
+          done
+          curl -fsS http://127.0.0.1:8787/health | python3 -m json.tool
+          kill %1
+
+      # scripts/e2e.sh 要在 CI 里跑得先装语言包（系统设置里手动装），
+      # 所以它不进 CI，只做本地验收。
