@@ -371,7 +371,7 @@ swift test -Xswiftc -plugin-path -Xswiftc "$(xcode-select -p)/usr/lib/swift/host
 
 那个 `sha256` 只有 tag 推上去之后才算得出来，所以它交给脚本，别手抄 —— 抄错了 brew 只会回一句 `SHA256 mismatch`。
 
-`--go` 之后还有两步要手动（脚本不替你做，因为要动别的仓库）：把 `Formula/apple-translate-api.rb` 提交进主仓库，再复制到 `homebrew-apple-translate-api` 仓库的 `Formula/` 下。
+`--go` 之后还有一步：把 `Formula/apple-translate-api.rb` **提交进主仓库**（脚本已经替你改好 url/sha256，但不替你 commit）。要是你另开了 `homebrew-apple-translate-api` 仓库，再把它复制过去。
 
 ## 同类项目
 

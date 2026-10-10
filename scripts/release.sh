@@ -133,7 +133,11 @@ PY
 grep -nE '^  (url|sha256)' "$FORMULA"
 
 echo
-echo "✅ 剩下三步："
+echo "✅ 剩下一步：把改好的公式提交进主仓库（脚本不替你 commit）"
 echo "   1. git add $FORMULA && git commit -m 'formula: $TAG' && git push"
-echo "   2. 把 $FORMULA 复制到 homebrew-apple-translate-api 仓库的 Formula/ 下并推上去"
-echo "   3. brew update && brew install apple-translate-api && brew services start apple-translate-api"
+echo "   2. 如果另开了 homebrew-apple-translate-api 仓库，再把它复制过去并推"
+echo
+echo "   装的人那边是这三行（注意 brew trust，Homebrew 7 起第三方 tap 必须显式信任）："
+echo "     brew tap $REPO_SLUG https://github.com/${REPO_SLUG}"
+echo "     brew trust ${REPO_SLUG}"
+echo "     brew install apple-translate-api && brew services start apple-translate-api"
