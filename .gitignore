@@ -1,0 +1,8 @@
+# SwiftPM 构建产物（体积很大，且里面存的是本机绝对路径）
+.build/
+
+# macOS
+.DS_Store
+
+# 日志
+*.log
