@@ -141,7 +141,7 @@ private final class ConnectionHandler: @unchecked Sendable {
                 case .complete(let request):
                     self.buffer.removeAll()
                     self.disarmIdleTimeout()
-                    let writer = ConnectionWriter(connection: self.connection)
+                    let writer = ConnectionWriter(connection: self.connection, isHead: request.method == "HEAD")
                     Task {
                         await self.handler(request, writer)
                         await writer.finish()
@@ -185,16 +185,22 @@ private final class ConnectionHandler: @unchecked Sendable {
 
 private final class ConnectionWriter: ResponseWriter, @unchecked Sendable {
     private let connection: NWConnection
+    private let isHead: Bool
     private let lock = NSLock()
     private var closed = false
 
-    init(connection: NWConnection) {
+    init(connection: NWConnection, isHead: Bool = false) {
         self.connection = connection
+        self.isHead = isHead
     }
 
     func send(_ response: HTTPResponse) async {
         var head = "HTTP/1.1 \(response.status) \(HTTPStatus.reason(response.status))\r\n"
-        head += "Content-Length: \(response.body.count)\r\n"
+        // RFC 9110 §8.6：204/1xx/304 的语义就包含「没有 body」，再带 Content-Length
+        // 会让中间设备以为后面还有东西。
+        if !Self.forbidsBody(response.status) {
+            head += "Content-Length: \(response.body.count)\r\n"
+        }
         for (name, value) in response.headers {
             head += "\(name): \(value)\r\n"
         }
@@ -202,8 +208,15 @@ private final class ConnectionWriter: ResponseWriter, @unchecked Sendable {
         head += "Connection: close\r\n\r\n"
 
         var payload = Data(head.utf8)
-        payload.append(response.body)
+        // RFC 9110 §9.3.2：HEAD 的响应只发头；Content-Length 照留（它描述的是等价 GET 的 body）。
+        if !isHead {
+            payload.append(response.body)
+        }
         await write(payload)
+    }
+
+    private static func forbidsBody(_ status: Int) -> Bool {
+        status == 204 || status == 304 || (100..<200).contains(status)
     }
 
     func beginStream(status: Int, contentType: String, extraHeaders: [String: String] = [:]) async {

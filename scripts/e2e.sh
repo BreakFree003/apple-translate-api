@@ -11,6 +11,18 @@ cd "$(dirname "$0")/.."
 
 PORT="${E2E_PORT:-8791}"
 CONFIG="${E2E_CONFIG:-debug}"
+DETECT_PORT="$((PORT + 1))"
+
+# 起服务之前先确认这两个端口空着。否则端口被占时新实例会立刻退出，而 curl 会打到
+# 占着端口的**别人**身上 —— 整轮验收就静默地测了旧进程。
+for candidate in "$PORT" "$DETECT_PORT"; do
+    if lsof -nP -iTCP:"${candidate}" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "端口 ${candidate} 已被占用：" >&2
+        lsof -nP -iTCP:"${candidate}" -sTCP:LISTEN 2>/dev/null >&2
+        echo "换一组空闲端口即可，例如：E2E_PORT=8801 ./scripts/e2e.sh" >&2
+        exit 1
+    fi
+done
 
 # 默认测源码构建产物。要验 brew（或别处）装的那个二进制，就覆盖 AT_BIN：
 #   AT_BIN=/opt/homebrew/bin/apple-translate-server ./scripts/e2e.sh
@@ -30,7 +42,6 @@ if [ ! -x "$BIN" ]; then
 fi
 
 LOG="$(mktemp -t apple-translate-e2e)"
-DETECT_PORT="$((PORT + 1))"
 DETECT_LOG="$(mktemp -t apple-translate-e2e-detect)"
 
 echo "▶ 在端口 ${PORT} 起服务（默认配置；日志：${LOG}）"
@@ -51,15 +62,17 @@ trap cleanup EXIT
 
 READY=0
 for _ in $(seq 1 60); do
-    if curl -fsS -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 &&
-       curl -fsS -m 2 "http://127.0.0.1:$DETECT_PORT/health" >/dev/null 2>&1; then
-        READY=1
-        break
-    fi
+    # 先看进程还活着，再问端口通不通：反过来的话，进程已经死了但端口上还有别的服务
+    # 在应答（预检没覆盖到的竞态），curl 会成功，`kill -0` 永远走不到。
     if ! kill -0 "$PID" 2>/dev/null || ! kill -0 "$DETECT_PID" 2>/dev/null; then
         echo "服务没起来，日志："
         cat "$LOG" "$DETECT_LOG"
         exit 1
+    fi
+    if curl -fsS -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 &&
+       curl -fsS -m 2 "http://127.0.0.1:$DETECT_PORT/health" >/dev/null 2>&1; then
+        READY=1
+        break
     fi
     sleep 0.5
 done

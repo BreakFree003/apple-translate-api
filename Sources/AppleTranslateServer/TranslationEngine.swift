@@ -86,6 +86,34 @@ actor SerialGate {
     }
 }
 
+/// `SessionBox` 只会用到 session 的这两个能力。抽成协议是为了让测试能塞一个必抛的替身，
+/// 从**真正持有门的那段生产代码**（`SessionBox.translate` 的 catch）验证「抛错也还门」。
+/// 原来的测试只在测试里抄了一份 acquire/catch/release，删掉生产代码那行它照样绿。
+protocol SessionTranslating: Sendable {
+    var isReady: Bool { get async }
+    func translate(_ text: String) async throws -> RawTranslation
+}
+
+/// 把框架的 `TranslationSession` 适配成上面的协议。
+///
+/// `@unchecked Sendable` 的理由和文件开头给 Translation 框架加 `@preconcurrency` 一样：
+/// 框架类型没标 Sendable，而真正的并发访问由 `SessionBox` 里的 `SerialGate` 串行化。
+struct TranslationSessionAdapter: SessionTranslating, @unchecked Sendable {
+    let session: TranslationSession
+
+    var isReady: Bool {
+        get async { await session.isReady }
+    }
+
+    func translate(_ text: String) async throws -> RawTranslation {
+        let response = try await session.translate(text)
+        return RawTranslation(
+            sourceLanguage: response.sourceLanguage.minimalIdentifier,
+            targetText: response.targetText
+        )
+    }
+}
+
 /// 一个 session 的串行化盒子。
 ///
 /// 框架要求同一个 `TranslationSession` 不能被并发调用；而 actor 的可重入性保证不了这件事，
@@ -96,10 +124,10 @@ actor SerialGate {
 /// 端口也一样排队（短句从空载 0.06s 变成 2.92s）—— 串行点在系统共享的 `translationd` 里。
 /// 这里排队换来的不是速度，是「同一 session 不被并发调用」这个**真的**保证。
 actor SessionBox {
-    private let session: TranslationSession
+    private let session: any SessionTranslating
     private let gate = SerialGate()
 
-    init(session: TranslationSession) {
+    init(session: any SessionTranslating) {
         self.session = session
     }
 
@@ -112,10 +140,7 @@ actor SessionBox {
         do {
             let response = try await session.translate(text)
             await gate.release()
-            return RawTranslation(
-                sourceLanguage: response.sourceLanguage.minimalIdentifier,
-                targetText: response.targetText
-            )
+            return response
         } catch {
             await gate.release()   // 抛错也要还门，否则这个语言对从此卡死
             throw error
@@ -271,7 +296,7 @@ actor TranslationEngine {
     private func box(for source: String, target: String) -> SessionBox {
         let key = "\(source)|\(target)|\(config.strategyKey)"
         if let existing = boxes[key] { return existing }
-        let created = SessionBox(session: makeSession(source: source, target: target))
+        let created = SessionBox(session: TranslationSessionAdapter(session: makeSession(source: source, target: target)))
         boxes[key] = created
         return created
     }

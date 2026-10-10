@@ -178,9 +178,19 @@ check(
     f"{status} {back!r}",
 )
 
-status, body = chat("今天天气不错，我们去散步吧。", target_language="zh-Hans")
-skipped = content_of(body) if status == 200 else ""
-check("正文已经是目标语言时原样返回", status == 200 and skipped == "今天天气不错，我们去散步吧。", f"{status} {skipped!r}")
+# 这条断言验的是 smartSkip 本身，所以用 /v1/translate（只有它回 `skipped` 字段），
+# 并且打到 AT_SOURCE_MODE=auto 的实例上 —— 那里检测器会认出源语言就是目标语言。
+# 打在默认实例上的话，正文原样返回只是因为「框架把中文当英文翻成中文」，与 smartSkip 无关。
+status, body = post(
+    "/v1/translate",
+    {"text": "今天天气不错，我们去散步吧。", "target": "zh-Hans"},
+    base=DETECT_BASE,
+)
+check(
+    "中文正文 + target=zh-Hans 时 smartSkip 生效：skipped=true 且原样返回（AT_SOURCE_MODE=auto）",
+    status == 200 and body.get("skipped") is True and body.get("translation") == "今天天气不错，我们去散步吧。",
+    f"{status} {body}",
+)
 
 # 回归：NLLanguageRecognizer 曾把这句话判成 tr 0.58 / en 0.32，而土耳其语包没装 → 400。
 status, body = chat("The cat sat on the mat.")

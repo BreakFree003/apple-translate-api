@@ -67,7 +67,10 @@ final class Router: Sendable {
             await writer.send(HTTPResponse(status: 204))
             return
         }
-        switch (request.method, request.path) {
+        // HEAD 按 RFC 9110 §9.3.2 应当与 GET 同状态码、同响应头，只是不发 body ——
+        // 所以这里按 GET 匹配路由，body 由 ConnectionWriter 那边掐掉。
+        // （404 报文里仍然报客户端真实的 method。）
+        switch (request.method == "HEAD" ? "GET" : request.method, request.path) {
         case ("GET", "/health"):
             await handleHealth(writer)
         case ("GET", "/v1/models"), ("GET", "/models"):
@@ -301,11 +304,17 @@ final class Router: Sendable {
         let breakCharacters: Set<Character> = ["。", "！", "？", "；", "，", ".", "!", "?", ";", ",", "\n", " "]
         var chunks: [String] = []
         var current = ""
+        // 自己数长度：`String.count` 是 O(n)，原来放在循环里就整体成了 O(n²) ——
+        // SSE 路径实测 8000 字 0.20s、16000 字 0.73s（2× 输入 3.6× 时间），
+        // 同样文本走非流式只要 2ms。
+        var count = 0
         for character in text {
             current.append(character)
-            if current.count >= limit, breakCharacters.contains(character) {
+            count += 1
+            if count >= limit, breakCharacters.contains(character) {
                 chunks.append(current)
                 current = ""
+                count = 0   // 边界必须和原来一致：切完重新数
             }
         }
         if !current.isEmpty { chunks.append(current) }

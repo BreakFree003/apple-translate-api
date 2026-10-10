@@ -197,7 +197,7 @@ Model:    apple-translate
 
 语言名支持别名：20 种语言共 143 种写法（`ja` / `jp` / `Japanese` / `日本語` / `日语` / `日文` 都行）。`GET /v1/languages` 只列 20 个规范 id，别名清单见 `Sources/AppleTranslateServer/LanguageCatalog.swift`。
 
-以上切分**只发生在 `/v1/chat/completions`**；`/v1/translate` 不管指令，原样翻 `text`。另外 `/v1/chat/completions` 也认顶层的 `text` 字段（等价于一条 user 消息）。
+以上切分**只发生在 `/v1/chat/completions`**；`/v1/translate` 不管指令，原样翻 `text`。另外 `/v1/chat/completions` 也认顶层的 `text` 字段（**优先于** user 消息）。
 
 ## 语言包
 
