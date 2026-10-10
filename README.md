@@ -232,6 +232,11 @@ curl -s "http://127.0.0.1:8787/v1/languages?source=en&target=ja" | jq .pair_stat
 
 **真正吃资源的不在这个进程里**：翻译运算跑在系统的 `/System/Library/Frameworks/Translation.framework/translationd`，常驻 **~280~360 MB**，翻的时候基本吃满一个核。它是全系统共享的守护进程（Safari、预览、查词也走它），不是本服务拉起来的，也不归本服务管 —— 想省这几百 MB 就只能不用系统的翻译框架。
 
+### 已知问题
+
+- **翻译框架卡死时没有超时保护。** 系统 `translationd` 某次调用若**永不返回**，那一对语言的调用会一直排着队，后面的请求全都卡住不动 —— 而且 `AT_READ_TIMEOUT` 帮不上忙（它只约束收请求，不管在飞的翻译）。遇到了就 `brew services restart apple-translate-api`，或者重启系统的翻译服务。实际撞上的概率很低，暂时没做请求级超时：要做就得先定清楚超时之后是放弃这次调用、返回 504、还是重启 `translationd`。
+- **`AT_SOURCE_MODE=english`（默认）下，非英语段落会被当英语翻**，常见结果是中英夹杂的胡话（HTTP 200，不报错）。多语种内容请改用 `retry` 或 `auto`，见 [`AT_SOURCE_MODE`](#at_source_mode源语言怎么定)。
+
 ### 安全
 
 - **默认只绑 `127.0.0.1`**，本机之外访问不到。

@@ -64,3 +64,11 @@ brew test local/apple-translate-api/apple-translate-api
 - **`ENV["SWIFTPM_MODULECACHE_OVERRIDE"]` 必须设**：SwiftPM 默认把 module cache 写到 `~/Library/Caches/org.swift.swiftpm`，brew 的构建 sandbox 不放行那里。`--disable-sandbox` 只关 SwiftPM 自己那层，关不掉 brew 外层那个。
 - **别在 plist 上做手脚**：brew services 的 plist 由公式的 `service` 块生成，改了会在下次 `brew services restart` 时被覆盖。要改参数就写 `~/.homebrew/services/apple-translate-api.env`。
 - **shell 里 `$VAR` 后面紧跟全角标点要写成 `${VAR}`**：bash 会把标点字节吃进变量名，报 `VAR�: unbound variable`。本项目在 `scripts/e2e.sh` 和 `scripts/test.sh` 里都为这个留了注释。
+
+## 已知问题（记着，暂不修）
+
+- **`SerialGate` 没有超时。** 如果系统 `translationd` 某次调用**永不返回**，`SessionBox.translate` 会一直挂在 `await` 上、握着那把门不放，那一对语言之后的所有请求都排在这个队尾 —— **永久排队**。`AT_READ_TIMEOUT` 救不了：它在收到完整请求时就 `disarm` 了，只管收请求。
+  - 现象：日志停在上一条 `chat …` 之后不再有新行，`/health` 仍然 200（它不碰翻译），后续翻译请求全部卡住。
+  - 恢复：`brew services restart apple-translate-api`。
+  - 为什么暂不修：超时之后干什么要先定语义 ——(a) 放弃这次调用给客户端 504，但 `translationd` 里那次可能还在跑；(b) 丢掉那个 `TranslationSession`（框架没有公开的取消/超时入口，只能弃引用）；(c) 重启整个服务。三条路都是新的产品决定，不该塞进补丁版本。
+  - 撞上的概率：两轮独立审计都没能诱发（也没敢在正在用的服务上试），只作风险记录。
