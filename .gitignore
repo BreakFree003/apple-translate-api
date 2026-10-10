@@ -1,8 +1,12 @@
 # SwiftPM 构建产物（体积很大，且里面存的是本机绝对路径）
 .build/
+.swiftpm/
 
 # macOS
 .DS_Store
 
 # 日志
 *.log
+
+# scripts/ 里的 python 辅助脚本
+__pycache__/

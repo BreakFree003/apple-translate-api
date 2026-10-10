@@ -25,7 +25,7 @@ let response = try await session.translate("Hello, world.")
 
 `@available(macOS 26.0, *)`。这一条就是整个工程的立身之本 —— 没有它，命令行进程只能去啃 SwiftUI 的 `.translationTask`（MoePeek 那种菜单栏 App 的做法：造一个 1×1 的隐形 NSWindow + NSHostingView 去托管一个 View，见 [cosZone/MoePeek](https://github.com/cosZone/MoePeek)）。
 
-实测这个类**没有 `@MainActor`**，detached Task / 后台队列 / 两个 session 并发都正常，纯命令行二进制直接跑，不需要 `.app` bundle。
+实测这个类**没有 `@MainActor`**，detached Task / 后台队列里调用都正常，多个 session 可以同时存在也不会崩（但框架内部是串行的，别指望并发提速 —— 见「性能与限制」），纯命令行二进制直接跑，不需要 `.app` bundle。
 
 ## 要求
 
@@ -36,22 +36,67 @@ let response = try await session.translate("Hello, world.")
 | 语言包 | 在 **系统设置 → 通用 → 语言与地区 → 翻译语言** 里装好要用的语言对 |
 | 权限 | 无。Entitlements 是空的 |
 
-## 构建与运行
+## 安装
+
+### Homebrew（推荐）
 
 ```bash
+# 公式在 homebrew-apple-translate-api 这个 tap 仓库里
+brew tap BreakFree003/apple-translate-api
+brew install apple-translate-api
+```
+
+（不想再开一个仓库的话，也可以直接 tap 主仓库：
+`brew tap BreakFree003/apple-translate-api https://github.com/BreakFree003/apple-translate-api` —— 显式给 URL 就不要求仓库名带 `homebrew-` 前缀。）
+
+当后台服务跑 —— launchd 托管，登录后自动起、崩了自动拉起来：
+
+```bash
+brew services start apple-translate-api
+curl -s http://127.0.0.1:8787/health
+brew services stop apple-translate-api      # 不想要常驻就停掉
+```
+
+改服务参数**不用碰 plist**。brew services 会读这个文件（一行一个 `KEY=value`，`#` 注释），
+它比公式里的默认值优先级更高：
+
+```bash
+cat > ~/.homebrew/services/apple-translate-api.env <<'EOF'
+AT_PORT=8787
+AT_DEFAULT_TARGET=ja
+# AT_HOST=0.0.0.0    # 注意：这样就是对外暴露，而本服务没有任何鉴权
+EOF
+brew services restart apple-translate-api
+```
+
+`~/.homebrew` 是 `HOMEBREW_USER_CONFIG_HOME` 的默认值（换过就按你的来）。
+日志在 `$(brew --prefix)/var/log/apple-translate-api.log`。
+
+### 从源码
+
+```bash
+git clone https://github.com/BreakFree003/apple-translate-api && cd apple-translate-api
 swift build -c release
-AT_PORT=8787 .build/out/Products/Release/apple-translate-server
+AT_PORT=8787 .build/release/apple-translate-server
 ```
 
-服务只绑 `127.0.0.1`，不会触发 macOS 的防火墙弹窗，且是**前台进程**（`Ctrl-C` 退出）。
+## 运行
 
-要放后台就自己重定向日志：
+服务只绑 `127.0.0.1`，不会触发 macOS 的防火墙弹窗，且默认是**前台进程**（`Ctrl-C` 退出，`SIGTERM` 也处理了，`brew services stop` 能干净收尾）。
+
+要自己放后台就重定向日志：
 
 ```bash
-nohup .build/out/Products/Release/apple-translate-server > /tmp/apple-translate.log 2>&1 &
+nohup .build/release/apple-translate-server > /tmp/apple-translate.log 2>&1 &
 ```
 
-本项目**不做任何开机自启注册** —— 不装 LaunchAgent、不写系统级配置。日志（`AT_LOG=1` 时每条请求一行）全部走 stderr，落到哪由你决定。
+日志（`AT_LOG=1` 时每条请求一行）全部走 stderr，落到哪由你决定。
+**错误日志不受 `AT_LOG` 控制** —— 端口被占这类启动失败永远打得出来，不会变成安静的 `exit 1`。
+
+```bash
+apple-translate-server --version    # apple-translate-server 0.1.0
+apple-translate-server --help       # 全部环境变量与开关
+```
 
 ## 配置
 
@@ -64,9 +109,12 @@ nohup .build/out/Products/Release/apple-translate-server > /tmp/apple-translate.
 | `AT_DEFAULT_SOURCE` | `en` | 源语言判不准时的兜底 |
 | `AT_DEFAULT_TARGET` | `zh-Hans` | 请求里没说目标语言时用哪个 |
 | `AT_MODEL` | `apple-translate` | 对外报的模型名 |
-| `AT_LOG` | `1` | 请求日志打到 stderr |
+| `AT_LOG` | `1` | 请求日志打到 stderr（**错误日志不受它控制**） |
 | `AT_SMART_SKIP` | `1` | 正文已经是目标语言时原样返回，不翻 |
 | `AT_MAX_CHARS` | `20000` | 单次请求正文字符上限，超了报 413 |
+| `AT_MAX_BODY` | `1048576` | 单次请求正文字节上限（1 MiB）。按 `Content-Length` 就拦，不等收完 |
+| `AT_MAX_HEADERS` | `65536` | 请求头字节上限，防「一直发头不发 terminator」 |
+| `AT_READ_TIMEOUT` | `30` | 连接建好后等一个完整请求的秒数，`0` = 不超时。只约束收请求，不约束翻译 |
 | `AT_SOURCE_MODE` | `auto` | 源语言策略，见下 |
 | `AT_STRATEGY` | 不指定 | `lowLatency` / `highFidelity`（macOS 26.4+）。**实测 en→zh-Hans 上没差别**，见下 |
 
@@ -167,6 +215,50 @@ print(client.chat.completions.create(
 ).choices[0].message.content)
 ```
 
+### 沉浸式翻译
+
+[沉浸式翻译](https://immersivetranslate.com/) 是浏览器扩展，跟本服务在同一台机器上，能直接连 `127.0.0.1` —— 整页翻译的每段都在你机器上翻完，不出网、不要 Key。
+
+**走它内置的「OpenAI」那一档，不要用 Beta 的「自定义接口」。** 后者要求 `{"source_lang","target_lang","text_list":[…]}` 那种专门格式，本服务没实现。
+
+先起服务（`brew services start apple-translate-api`），然后扩展 **设置 → 翻译服务 → 底部「添加 OpenAI 兼容服务」**（老版本是选 `OpenAI` 再切到「自定义 API Key」），填：
+
+| 字段 | 填什么 |
+| --- | --- |
+| 自定义翻译服务名称 | `Apple Translate`（随便起） |
+| 自定义 API 接口地址 | `http://127.0.0.1:8787/v1/chat/completions` |
+| APIKEY | 随便填，如 `sk-local` —— 本服务不校验 |
+| 模型 | 勾「输入自定义模型名称」，填 `apple-translate`（即 `AT_MODEL`） |
+| 每秒最大请求数 | `2`～`3`，别用默认值 |
+
+最后点「点击测试服务」，翻一段短的确认。
+
+参考量级：一次 **100 段 / 9090 字符**（约等于一篇中等长度的网页）的正文，服务端 **3.1 秒**翻完。
+
+几件要知道的事：
+
+- **地址要写全 `/v1/chat/completions`**，别只写 `http://127.0.0.1:8787`。旧版本扩展（Firefox 商店曾分发的 1.30.2）对只填主机名的写法会拼成 `/chat/completions`，直接 404；写全路径各版本都对。
+- **模型名填什么都行**：本服务不读请求里的 `model` 字段，响应里一律回 `AT_MODEL`。扩展爱发的 `temperature` / `max_tokens` / `top_p` 也一律忽略 —— JSON 里多出来的键不会让请求失败。
+- **目标语言是扩展写在 prompt 里、由本服务认出来的**（`Translate into Chinese…` / `翻译成中文：`），所以 `AT_DEFAULT_TARGET` 基本用不上。但扩展里选的目标语言如果本地**没装那个语言包**，会回 400 `language_not_installed`，装法见[语言包在哪装](#语言包在哪装)。
+- **「每秒最大请求数」要调低**。整页翻译会瞬间产生几十个请求，而本服务受系统框架限制**只能串行翻**（见「性能与限制」），排队会让排在后面的请求等很久；扩展的请求超时在百秒量级，攒多了就开始报错。调到 2~3，让扩展自己控节奏，反而更快更稳。
+- **一批太长会被 413**。扩展会把多段合并成一个请求发，超过 `AT_MAX_CHARS`（默认 20000 字符）或 `AT_MAX_BODY`（1 MiB）会被拒。遇到就调大服务端的 `AT_MAX_CHARS`，或在扩展里把每批字符数调小。
+- **想完全跳过「猜 prompt」**：在扩展的 `开发者设置 → Edit Full User Config` 里给 `translationServices.openai.bodyConfigs` 加上 `{"target_language": "zh-Hans"}`，本服务认这个非标字段，优先级高于 prompt 解析（见[目标语言怎么定](#目标语言怎么定)）。该字段属于扩展的高级配置，名字和可用性以你装的那个版本为准。
+
+| 现象 | 多半是 |
+| --- | --- |
+| 404 | 地址没写到 `/v1/chat/completions` |
+| 连不上 | 服务没起；或 `AT_HOST` 绑的不是回环 |
+| 400 `language_not_installed` | 本地没装该目标语言的语言包 |
+| 400 `invalid_request` | 选成了 Beta 的「自定义接口」，body 不是 OpenAI 格式 |
+| 413 | 批次太长，见上 |
+| 翻得慢 | 排队，调低每秒最大请求数 |
+
+## 安全
+
+- **默认只绑 `127.0.0.1`**，本机之外访问不到，也不会弹防火墙。
+- **没有任何鉴权**。一旦 `AT_HOST=0.0.0.0`，同网段任何人都能拿你的机器当翻译机（顺带吃你的 CPU）。真要对外，请自己在前面套一层带认证的反向代理。
+- **CORS 回的是 `Access-Control-Allow-Origin: *`** —— 你浏览器里打开的任意网页都能访问 `http://127.0.0.1:8787` 并把内容送进来翻译。本地工具的常见取舍，能接受就用；介意的话在网关层收口。
+
 ## 性能与限制
 
 - **延迟**：实测 37 字符 ~77ms、5200 字符 ~3.0s。首次调用偏慢（要 warm up），服务启动时会自己预热一次。
@@ -174,7 +266,15 @@ print(client.chat.completions.create(
 - **`LanguageAvailability.status()` 冷启动不可信**：第一次可能报 `supported`（意思是要下载），紧接着就翻译成功。别拿它当闸门 —— 本服务的做法是直接翻，失败了再归类错误。
 - **只翻最后一段正文**，不是通用对话模型；system 提示只用来提取语言。
 - **`usage` 是按字符数估的假 token**，别拿它算钱。
-- 一次连接只处理一个请求（靠 `Connection: close` 划边界），没有 HTTP/1.1 keep-alive 复用。
+- **并发是假的，排队是真的**：`Translation` 框架内部就是串行的 —— 一条 12000 字的 en→zh-Hans 在飞时，
+  **另一个语言对**（zh-Hans→en）的小请求照样要等满 5.4s（对同一台机器上未改动的版本做对照实验是 5.1s）。
+  所以上面那行「8 路并发 218ms」是把 8 条请求排着队跑完的总时间，不是 8 路并行。
+  服务端按语言对缓存 session 并把同一 session 的调用串行化，只是为了让「同一 session 不被并发调用」这件事成立，
+  **换不来吞吐**。**多开进程也没用**：实测两个进程各绑一个端口（`AT_PORT=8793` / `8794`），大请求在 A 上飞时，
+  B 上的短句请求从空载 **0.06s** 变成 **2.92s** —— 串行点在系统共享的 `translationd` 里，不在本服务里。
+  所以能做的只有「别堆并发、把请求切小」，真要吞吐只能等 Apple 改框架。
+- **一次连接一个请求**（`Connection: close`），没有 keep-alive 复用；连上不发的连接 30 秒会被踢掉（`AT_READ_TIMEOUT`）。
+- **`Content-Length` 之外的传输方式不支持**：chunked 请求体会明确返回 `411 length_required`（不会静默当成空 body）。
 
 ## 资源占用
 
@@ -188,7 +288,7 @@ print(client.chat.completions.create(
 | 本进程每条请求 CPU | ~6 ms（连接建立 + JSON + 日志） |
 | 线程 / fd | 2~3 / 15~16，不随请求增长 |
 | 串行吞吐 | 32~37 req/s |
-| 8 路并发 | 218ms，0 失败 |
+| 8 路并发发出 | 218ms 全部返回，0 失败（**是排队跑完的**，见下） |
 
 **真正吃资源的不在这个进程里**：翻译运算跑在系统的 `/System/Library/Frameworks/Translation.framework/translationd`，实测 ~420 MB 常驻、约 26 ms CPU/条。它是全系统共享的守护进程（Safari、预览、查词也走它），不是本服务拉起来的，也不归本服务管 —— 想省这 420 MB 就只能不用系统的翻译框架。
 
@@ -204,10 +304,17 @@ print(client.chat.completions.create(
 排查源语言误判可以用：
 
 ```bash
-.build/out/Products/Release/apple-translate-server --detect "The cat sat on the mat."
+.build/release/apple-translate-server --detect "The cat sat on the mat."
 #   tr 0.582
 #   en 0.322
 # → en
+```
+
+## 测试
+
+```bash
+swift test          # 32 个单测：HTTP 解析、prompt 切分、语言目录、配置解析（不碰翻译框架）
+./scripts/e2e.sh    # 端到端验收，需要语言包
 ```
 
 ## 验收
@@ -216,9 +323,24 @@ print(client.chat.completions.create(
 ./scripts/e2e.sh
 ```
 
+（`AT_BIN=/opt/homebrew/bin/apple-translate-server ./scripts/e2e.sh` 可以改成验收 brew 装的那个二进制。）
+
 起一个真服务（独立端口 8791）、发真请求、翻真文本，24 项断言：接口形状、目标语言的可观测性质（日语必须有假名、中文必须有汉字且无假名）、指令切分、SSE、错误码、`openai` SDK 的非流式与流式调用。任一项失败非 0 退出并打印服务日志。
 
 依赖语言包的断言会**跟着系统实际状态走**：装了 `ja` 就要求翻出假名，没装就要求返回明确点名 `ja` 的 `400 language_not_installed` —— 两条路都不许静默翻错，也不会因为某台机器上删了包而假绿。
+
+## 发布
+
+版本号只有一处：`Sources/AppleTranslateServer/Version.swift`。改完提交，然后：
+
+```bash
+./scripts/release.sh 0.1.0          # 干跑：查版本号/工作树/tag 冲突，跑构建和单测
+./scripts/release.sh 0.1.0 --go     # 打 tag → push → 抓 GitHub tarball 算 sha256 → 写进 formula
+```
+
+那个 `sha256` 只有 tag 推上去之后才算得出来，所以它交给脚本，别手抄 —— 抄错了 brew 只会回一句 `SHA256 mismatch`。
+
+`--go` 之后还有两步要手动（脚本不替你做，因为要动别的仓库）：把 `Formula/apple-translate-api.rb` 提交进主仓库，再复制到 `homebrew-apple-translate-api` 仓库的 `Formula/` 下。
 
 ## 同类项目
 
@@ -227,3 +349,7 @@ print(client.chat.completions.create(
 完整对照、协议生态、可直接复用的库、各家踩过的坑，见 [`docs/prior-art.md`](docs/prior-art.md)。
 
 一句话：**「Apple 端上翻译 → 本地 HTTP 服务」至少有 5 个人在做，但「OpenAI 方言 + 任意 source/target + 无 Xcode 的 SwiftPM CLI」这个组合目前只有我们。** 生态主流的接口其实是 DeepL / LibreTranslate / DLX，不是 OpenAI。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
