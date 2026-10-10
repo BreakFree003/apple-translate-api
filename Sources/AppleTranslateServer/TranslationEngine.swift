@@ -57,13 +57,54 @@ struct TranslationOutcome: Sendable {
     let skipped: Bool
 }
 
+/// 一个 session 的串行化盒子。
+///
+/// 框架要求同一个 `TranslationSession` 不能被并发调用，所以用 actor 把「同一个语言对」
+/// 的调用排成队。
+///
+/// 别指望这能换来吞吐：实测系统框架内部自己就是串行的 —— 一条 12000 字的 en→zh-Hans
+/// 在飞的时候，另一个语言对（zh-Hans→en）的小请求照样要等满 5.4s；把原来的单一 actor
+/// 换成「每对一盒」并没有改变这个数字（对 HEAD 做同样的实验是 5.1s）。
+///
+/// 换来的不是速度，而是一个**真的**保证：原实现整个引擎只有一个 actor，而 actor 在
+/// `await` 处是可重入的 —— 「actor 串行化保证同一个 session 不会被并发调用」那句话
+/// 当时并不成立，四个并发请求确实会同时进同一个 session。现在它才成立。
+actor SessionBox {
+    private let session: TranslationSession
+
+    init(session: TranslationSession) {
+        self.session = session
+    }
+
+    var isReady: Bool {
+        get async { await session.isReady }
+    }
+
+    func translate(_ text: String) async throws -> RawTranslation {
+        let response = try await session.translate(text)
+        return RawTranslation(
+            sourceLanguage: response.sourceLanguage.minimalIdentifier,
+            targetText: response.targetText
+        )
+    }
+}
+
+/// session 翻出来的原始结果。抽出来是为了不依赖框架 Response 的具体类型名。
+struct RawTranslation: Sendable {
+    let sourceLanguage: String
+    let targetText: String
+}
+
 /// 持有 `TranslationSession` 池的 actor。
 ///
 /// 一个 session 绑定一对语言（`installedSource:target:` 的语义就是「源语言的语言包已装好」），
-/// 所以按语言对缓存复用。actor 串行化保证同一个 session 不会被并发调用。
+/// 所以按语言对缓存复用，每个语言对包一个 `SessionBox`。
+///
+/// 本 actor 只做「查表 / 建盒 / 判语言」这类轻活；真正耗时的 `await box.translate()`
+/// 会挂起本 actor 让出执行权，所以它不会在框架自身的串行之外再加一层排队。
 actor TranslationEngine {
     private let config: Config
-    private var sessions: [String: TranslationSession] = [:]
+    private var boxes: [String: SessionBox] = [:]
 
     init(config: Config) {
         self.config = config
@@ -134,18 +175,18 @@ actor TranslationEngine {
             )
         }
 
-        let session = session(for: source, target: targetLanguage.id)
+        let box = box(for: source, target: targetLanguage.id)
         do {
-            let response = try await session.translate(text)
+            let response = try await box.translate(text)
             return TranslationOutcome(
-                sourceLanguage: response.sourceLanguage.minimalIdentifier,
+                sourceLanguage: response.sourceLanguage,
                 targetLanguage: targetLanguage.id,
                 text: response.targetText,
                 skipped: false
             )
         } catch {
             if error is CancellationError { throw error }
-            if !(await session.isReady) {
+            if !(await box.isReady) {
                 throw TranslationFailure.notInstalled(source: source, target: targetLanguage.id)
             }
             throw map(error, source: source, target: targetLanguage.id)
@@ -157,8 +198,8 @@ actor TranslationEngine {
         let target = LanguageCatalog.canonical(config.defaultTarget) ?? "zh-Hans"
         let source = LanguageCatalog.canonical(config.defaultSource) ?? "en"
         guard source != target else { return }
-        let session = session(for: source, target: target)
-        _ = try? await session.translate("warm up")
+        let box = box(for: source, target: target)
+        _ = try? await box.translate("warm up")
     }
 
     /// 这台 Mac 上 Apple Translation 认得的语言（统一成和 catalog 一致的规范 id）。
@@ -193,24 +234,26 @@ actor TranslationEngine {
 
     // MARK: - Private
 
-    private func session(for source: String, target: String) -> TranslationSession {
+    private func box(for source: String, target: String) -> SessionBox {
         let key = "\(source)|\(target)|\(config.strategyKey)"
-        if let existing = sessions[key] { return existing }
-        let created: TranslationSession
+        if let existing = boxes[key] { return existing }
+        let created = SessionBox(session: makeSession(source: source, target: target))
+        boxes[key] = created
+        return created
+    }
+
+    private func makeSession(source: String, target: String) -> TranslationSession {
         if let preferred = config.translationStrategy, #available(macOS 26.4, *) {
-            created = TranslationSession(
+            return TranslationSession(
                 installedSource: Locale.Language(identifier: source),
                 target: Locale.Language(identifier: target),
                 preferredStrategy: preferred == .lowLatency ? .lowLatency : .highFidelity
             )
-        } else {
-            created = TranslationSession(
-                installedSource: Locale.Language(identifier: source),
-                target: Locale.Language(identifier: target)
-            )
         }
-        sessions[key] = created
-        return created
+        return TranslationSession(
+            installedSource: Locale.Language(identifier: source),
+            target: Locale.Language(identifier: target)
+        )
     }
 
     private func map(_ error: Error, source: String, target: String) -> TranslationFailure {

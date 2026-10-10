@@ -89,7 +89,7 @@ final class Router: Sendable {
     private func handleHealth(_ writer: any ResponseWriter) async {
         let body = HealthResponse(
             model: config.modelName,
-            server: "apple-translate-api",
+            server: "apple-translate-api/\(Version.string)",
             uptime_seconds: Int(Date().timeIntervalSince(startedAt)),
             default_source: config.defaultSource,
             default_target: config.defaultTarget,

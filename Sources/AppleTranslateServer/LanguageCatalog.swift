@@ -10,7 +10,10 @@ struct Language: Sendable, Hashable {
     let aliases: [String]
 }
 
-/// Apple Translation 在 macOS 27 上支持的 21 种语言（`LanguageAvailability.supportedLanguages` 实测结果）。
+/// Apple Translation 支持的 20 种语言。
+///
+/// 取自 `LanguageAvailability.supportedLanguages` 的实测结果：原始返回 21 条，
+/// 其中 `en-GB` 与 `en` 在本服务的规范化里归并成一条，去重后 20 条。
 enum LanguageCatalog {
     static let all: [Language] = [
         Language(id: "ar", english: "Arabic", chinese: "阿拉伯语",

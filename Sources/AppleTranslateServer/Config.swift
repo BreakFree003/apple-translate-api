@@ -47,6 +47,13 @@ struct Config: Sendable {
     var smartSkip: Bool = true
     /// 单次请求的正文上限（字符）。超了直接报错，免得一个请求把进程拖住。
     var maxCharacters: Int = 20_000
+    /// 单次请求正文字节上限。字符上限之外再拦一道 —— 光看 Content-Length 就得挡住，
+    /// 不能等收完才知道太大。
+    var maxBodyBytes: Int = 1 << 20
+    /// 请求头字节上限，防「一直发头不发 terminator」。
+    var maxHeaderBytes: Int = 64 << 10
+    /// 连接建好后等一个完整请求的秒数；0 = 不超时。只约束收请求，不约束翻译本身。
+    var readTimeout: TimeInterval = 30
     /// 源语言策略，见 SourceMode。
     var sourceMode: SourceMode = .auto
     /// 翻译策略；nil = 用框架默认（不显式指定）。
@@ -56,7 +63,11 @@ struct Config: Sendable {
     var strategyKey: String { translationStrategy?.rawValue ?? "default" }
 
     static func fromEnvironment() -> Config {
-        let env = ProcessInfo.processInfo.environment
+        fromEnvironment(ProcessInfo.processInfo.environment)
+    }
+
+    /// 真正干活的那个。拆出带参数的重载是为了能测 —— 进程环境在测试里改不了。
+    static func fromEnvironment(_ env: [String: String]) -> Config {
         var c = Config()
         if let v = env["AT_HOST"], !v.isEmpty { c.host = v }
         if let v = env["AT_PORT"], let p = UInt16(v) { c.port = p }
@@ -66,6 +77,9 @@ struct Config: Sendable {
         if let v = env["AT_LOG"] { c.logRequests = isTruthy(v) }
         if let v = env["AT_SMART_SKIP"] { c.smartSkip = isTruthy(v) }
         if let v = env["AT_MAX_CHARS"], let n = Int(v), n > 0 { c.maxCharacters = n }
+        if let v = env["AT_MAX_BODY"], let n = Int(v), n > 0 { c.maxBodyBytes = n }
+        if let v = env["AT_MAX_HEADERS"], let n = Int(v), n > 0 { c.maxHeaderBytes = n }
+        if let v = env["AT_READ_TIMEOUT"], let n = Double(v), n >= 0 { c.readTimeout = n }
         if let v = env["AT_SOURCE_MODE"], let mode = SourceMode.parse(v) { c.sourceMode = mode }
         if let v = env["AT_STRATEGY"], let strategy = TranslationStrategy.parse(v) { c.translationStrategy = strategy }
         return c

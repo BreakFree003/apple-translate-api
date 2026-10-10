@@ -36,15 +36,19 @@ final class HTTPServer: @unchecked Sendable {
         )
 
         let listener = try NWListener(using: parameters)
-        listener.newConnectionHandler = { [handler, queue] connection in
-            ConnectionHandler(connection: connection, queue: queue, handler: handler).start()
+        let config = self.config
+        listener.newConnectionHandler = { [handler, queue, config] connection in
+            ConnectionHandler(connection: connection, queue: queue, config: config, handler: handler).start()
         }
         listener.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                Log.info("listening on http://\(self.config.host):\(listener.port?.rawValue ?? self.config.port)")
+                Log.info("listening on http://\(config.host):\(listener.port?.rawValue ?? config.port)")
             case .failed(let error):
+                // 端口占用是在这里异步报出来的，`NWListener(using:)` 不会抛 ——
+                // 所以排查提示必须放在这一支，别放在 start() 的 catch 里。
                 Log.error("listener failed: \(error)")
+                Log.error("port \(config.port) may already be in use — set AT_PORT to pick another one.")
                 exit(1)
             default:
                 break
@@ -58,17 +62,24 @@ final class HTTPServer: @unchecked Sendable {
 // MARK: - 单连接
 
 private final class ConnectionHandler: @unchecked Sendable {
+    /// 单次读上限。请求体上限由 HTTPParse 按 Content-Length 把关，这里只决定分几次收。
+    private static let receiveChunk = 64 * 1024
+
     private let connection: NWConnection
     private let queue: DispatchQueue
+    private let config: Config
     private let handler: HTTPServer.Handler
     private var buffer = Data()
+    private var sentContinue = false
+    private var idleTimer: DispatchSourceTimer?
     /// 自己把自己留住：NWListener 不管连接处理对象，不这么做对象会在 start() 返回后
     /// 立刻释放，receive 回调里的 weak self 全变 no-op，连接就一直挂着不响应。
     private var selfRetain: ConnectionHandler?
 
-    init(connection: NWConnection, queue: DispatchQueue, handler: @escaping HTTPServer.Handler) {
+    init(connection: NWConnection, queue: DispatchQueue, config: Config, handler: @escaping HTTPServer.Handler) {
         self.connection = connection
         self.queue = queue
+        self.config = config
         self.handler = handler
     }
 
@@ -77,37 +88,97 @@ private final class ConnectionHandler: @unchecked Sendable {
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled:
-                guard let self else { return }
-                self.connection.cancel()
-                self.selfRetain = nil
+                self?.close()
             default:
                 break
             }
         }
         connection.start(queue: queue)
+        armIdleTimeout()
         receive()
     }
 
+    /// 连上却不发请求的连接不能一直吊着 —— 后台服务跑几周，这种连接会攒起来。
+    private func armIdleTimeout() {
+        let seconds = config.readTimeout
+        guard seconds > 0 else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + seconds)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            Log.info("no complete request within \(Int(seconds))s, closing connection")
+            self.close()
+        }
+        timer.resume()
+        idleTimer = timer
+    }
+
+    /// 唯一的下线路径。timer 必须先 cancel 再放手 —— 释放一个还活着的
+    /// DispatchSourceTimer 会触发 libdispatch 的 "source that has not been cancelled" 崩溃。
+    private func close() {
+        idleTimer?.cancel()
+        idleTimer = nil
+        connection.cancel()
+        selfRetain = nil
+    }
+
+    /// 请求收全了，之后的时间归路由和翻译，不再受空闲超时约束。
+    private func disarmIdleTimeout() {
+        idleTimer?.cancel()
+        idleTimer = nil
+    }
+
     private func receive() {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 256 * 1024) { [weak self] data, _, isComplete, error in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: Self.receiveChunk) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let data, !data.isEmpty {
                 self.buffer.append(data)
-                if let request = HTTPParse.request(from: self.buffer) {
+                switch HTTPParse.parse(
+                    self.buffer,
+                    maxBodyBytes: self.config.maxBodyBytes,
+                    maxHeaderBytes: self.config.maxHeaderBytes
+                ) {
+                case .complete(let request):
                     self.buffer.removeAll()
+                    self.disarmIdleTimeout()
                     let writer = ConnectionWriter(connection: self.connection)
                     Task {
                         await self.handler(request, writer)
                         await writer.finish()
                     }
                     return
+                case .rejected(let rejection):
+                    self.reject(rejection)
+                    return
+                case .incomplete:
+                    self.sendContinueIfWaiting()
                 }
             }
             if isComplete || error != nil {
-                self.connection.cancel()
+                self.close()
                 return
             }
             self.receive()
+        }
+    }
+
+    /// 客户端发了 `Expect: 100-continue` 就先回一个中间响应。不回的话它不会传 body，
+    /// 只能等自己的超时 —— .NET / Java 的 HttpClient 对大 body 默认就发这个头。
+    private func sendContinueIfWaiting() {
+        guard !sentContinue, HTTPParse.expectsContinue(in: buffer) else { return }
+        sentContinue = true
+        connection.send(
+            content: Data("HTTP/1.1 100 Continue\r\n\r\n".utf8),
+            completion: .contentProcessed { _ in }
+        )
+    }
+
+    private func reject(_ rejection: HTTPParse.Rejection) {
+        disarmIdleTimeout()
+        let writer = ConnectionWriter(connection: connection)
+        Task {
+            await writer.send(.json(rejection.status, APIErrorEnvelope.make(rejection.message, code: rejection.code)))
+            await writer.finish()
         }
     }
 }

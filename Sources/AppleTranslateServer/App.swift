@@ -3,6 +3,16 @@ import Foundation
 @main
 struct App {
     static func main() {
+        // 发布脚本和 brew formula 的 test 块要用，先处理掉 —— 这两个开关不读环境变量。
+        if CommandLine.arguments.contains("--version") {
+            print("apple-translate-server \(Version.string)")
+            exit(0)
+        }
+        if CommandLine.arguments.contains("--help") || CommandLine.arguments.contains("-h") {
+            print(Self.usage)
+            exit(0)
+        }
+
         let config = Config.fromEnvironment()
 
         // 调试开关：解释一句话会被判成什么语言，不启服务。
@@ -24,7 +34,7 @@ struct App {
             exit(0)
         }
 
-        Log.enabled = config.logRequests
+        Log.verbose = config.logRequests
 
         let engine = TranslationEngine(config: config)
         let router = Router(config: config, engine: engine)
@@ -40,7 +50,7 @@ struct App {
             try server.start()
         } catch {
             Log.error("could not start server: \(error)")
-            Log.error("port \(config.port) may already be in use — set AT_PORT to pick another one.")
+            Log.error("check AT_HOST/AT_PORT — currently \(config.host):\(config.port)")
             exit(1)
         }
 
@@ -55,6 +65,22 @@ struct App {
 
         dispatchMain()
     }
+
+    private static let usage = """
+    apple-translate-server \(Version.string)
+    Apple 端上翻译 → OpenAI 兼容的本地 HTTP API。配置全部走环境变量。
+
+    用法：
+      apple-translate-server                 起服务
+      apple-translate-server --version       打印版本
+      apple-translate-server --detect <文本>  只做语言判定，不启服务
+      apple-translate-server --detect -      从 stdin 逐行读、逐行输出判定结果
+
+    环境变量：AT_HOST AT_PORT AT_DEFAULT_SOURCE AT_DEFAULT_TARGET AT_MODEL
+              AT_LOG AT_SMART_SKIP AT_MAX_CHARS AT_MAX_BODY AT_MAX_HEADERS
+              AT_READ_TIMEOUT AT_SOURCE_MODE AT_STRATEGY
+    各项含义见 README。
+    """
 
     private static func installSignalHandlers() {
         for signalNumber in [SIGINT, SIGTERM] {
