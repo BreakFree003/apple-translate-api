@@ -54,16 +54,18 @@ echo "  origin = ${REMOTE:-（还没配）}"
 echo "▶ 构建 + 单测"
 swift build -c release
 
-# 这里必须看 swift test 的**退出码**，不能只看输出里有没有 "Test run with" ——
+# 这里必须看退出码，不能只看输出里有没有 "Test run with" ——
 # 单测失败时那行也照样打得出来（"Test run with 32 tests ... failed"），
 # 于是红着也能一路 tag + push。
+# 走 scripts/test.sh：裸 swift test 在某些工具链上会误报宏插件找不到（见那个脚本的注释），
+# 拿它当发版闸门会把工具链的毛病当成代码的毛病。
 TEST_STATUS=0
-TEST_LOG="$(swift test 2>&1)" || TEST_STATUS=$?
+TEST_LOG="$(./scripts/test.sh 2>&1)" || TEST_STATUS=$?
 echo "$TEST_LOG" | grep -E 'Test run with' || true
 if [ "$TEST_STATUS" -ne 0 ]; then
     echo "✗ 单测没过，不发。失败摘要：" >&2
     echo "$TEST_LOG" | grep -E 'error:|✘|failed' | head -20 >&2
-    echo "  完整输出：swift test" >&2
+    echo "  完整输出：./scripts/test.sh" >&2
     exit 1
 fi
 

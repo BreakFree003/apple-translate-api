@@ -314,8 +314,21 @@ print(client.chat.completions.create(
 ## 测试
 
 ```bash
-swift test          # 32 个单测：HTTP 解析、prompt 切分、语言目录、配置解析（不碰翻译框架）
+./scripts/test.sh   # 40 个单测：HTTP 解析、串行闸门、prompt 切分、语言目录、配置解析（不碰翻译框架）
 ./scripts/e2e.sh    # 端到端验收，需要语言包
+```
+
+**为什么单测要过一层 `scripts/test.sh`。** 只装 CommandLineTools 的机器上，裸 `swift test` 的增量构建有时会在显式 module 的插件列表里漏掉 `TestingMacros`：
+
+```
+error: external macro implementation type 'TestingMacros.TestDeclarationMacro'
+       could not be found for macro 'Test'; plugin for module 'TestingMacros' not found
+```
+
+实测裸跑是 PASS/FAIL 交替（连跑 4 次挂 2 次），显式给出 `-plugin-path` 之后 4/4 通过。脚本就是替你加这个参数（也兼容装了完整 Xcode 的机器），**这个报错跟本项目的代码无关**。撞上了手动加也行：
+
+```bash
+swift test -Xswiftc -plugin-path -Xswiftc "$(xcode-select -p)/usr/lib/swift/host/plugins/testing"
 ```
 
 ## 验收
