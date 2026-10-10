@@ -14,6 +14,9 @@ import urllib.error
 import urllib.request
 
 BASE = os.environ.get("AT_E2E_BASE", "http://127.0.0.1:8791")
+# 另一个实例，显式开了源语言检测（AT_SOURCE_MODE=auto）。默认值现在是 english（源语言固定
+# 成 AT_DEFAULT_SOURCE、不做检测），所以「检测器能不能认出来」这类断言要打到这个 base 上。
+DETECT_BASE = os.environ.get("AT_E2E_DETECT_BASE", BASE)
 
 passed: list[str] = []
 failed: list[tuple[str, str]] = []
@@ -28,9 +31,9 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         print(f"  ❌ {name} — {detail}")
 
 
-def post(path: str, payload: dict, timeout: int = 180):
+def post(path: str, payload: dict, timeout: int = 180, base=None):
     request = urllib.request.Request(
-        BASE + path,
+        (base or BASE) + path,
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -42,13 +45,13 @@ def post(path: str, payload: dict, timeout: int = 180):
         return error.code, json.loads(error.read().decode())
 
 
-def get(path: str, timeout: int = 60):
-    with urllib.request.urlopen(BASE + path, timeout=timeout) as response:
+def get(path: str, timeout: int = 60, base=None):
+    with urllib.request.urlopen((base or BASE) + path, timeout=timeout) as response:
         return response.status, json.loads(response.read().decode())
 
 
-def chat(content: str, **extra) -> tuple[int, dict]:
-    return post("/v1/chat/completions", {"messages": [{"role": "user", "content": content}], **extra})
+def chat(content: str, base=None, **extra) -> tuple[int, dict]:
+    return post("/v1/chat/completions", {"messages": [{"role": "user", "content": content}], **extra}, base=base)
 
 
 def content_of(body: dict) -> str:
@@ -163,10 +166,14 @@ ja_ready = pair_installed("en", "ja")
 status, body = chat("Good morning, have a nice day.", target_language="ja")
 check_pack_dependent("显式 target_language=ja 翻成日语", status, body, ja_ready, "ja")
 
-status, body = chat("今天天气不错，我们去散步吧。", target_language="en")
+status, health = get("/health")
+check("默认把源语言固定成英文（不检测）", health.get("source_mode") == "english", str(health.get("source_mode")))
+
+# 下面两条测的是「检测」能力本身，所以打到那个显式开了 AT_SOURCE_MODE=auto 的实例上。
+status, body = chat("今天天气不错，我们去散步吧。", target_language="en", base=DETECT_BASE)
 back = content_of(body) if status == 200 else ""
 check(
-    "中译英：自动判出源语言是中文",
+    "中译英：自动判出源语言是中文（AT_SOURCE_MODE=auto）",
     status == 200 and has_latin_letter(back) and not has_cjk(back),
     f"{status} {back!r}",
 )
@@ -264,9 +271,9 @@ except urllib.error.HTTPError as error:
     unknown_status = error.code
 check("未知路由返回 404", unknown_status == 404, str(unknown_status))
 
-status, body = post("/v1/translate", {"text": "Bonjour tout le monde", "target": "zh-Hans"})
+status, body = post("/v1/translate", {"text": "Bonjour tout le monde", "target": "zh-Hans"}, base=DETECT_BASE)
 check(
-    "/v1/translate 能用（装了法语包的话）",
+    "/v1/translate 能用（AT_SOURCE_MODE=auto，装了法语包的话）",
     (status == 200 and has_cjk(body.get("translation", "")))
     or (status == 400 and body.get("error", {}).get("code") == "language_not_installed"),
     f"{status} {body}",

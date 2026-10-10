@@ -30,43 +30,58 @@ if [ ! -x "$BIN" ]; then
 fi
 
 LOG="$(mktemp -t apple-translate-e2e)"
-echo "▶ 在端口 ${PORT} 起服务（日志：${LOG}）"
+DETECT_PORT="$((PORT + 1))"
+DETECT_LOG="$(mktemp -t apple-translate-e2e-detect)"
+
+echo "▶ 在端口 ${PORT} 起服务（默认配置；日志：${LOG}）"
 AT_PORT="$PORT" AT_LOG=1 "$BIN" >"$LOG" 2>&1 &
 PID=$!
 
+# 再起一个显式打开源语言检测的实例。默认值现在是 english（固定英文、不检测），
+# 而「检测器能不能把中文/法语认出来」这件事仍然值得测 —— 那几条断言打到这个实例上。
+echo "▶ 在端口 ${DETECT_PORT} 起服务（AT_SOURCE_MODE=auto；日志：${DETECT_LOG}）"
+AT_PORT="$DETECT_PORT" AT_SOURCE_MODE=auto AT_LOG=1 "$BIN" >"$DETECT_LOG" 2>&1 &
+DETECT_PID=$!
+
 cleanup() {
-    kill "$PID" 2>/dev/null || true
-    wait "$PID" 2>/dev/null || true
+    kill "$PID" "$DETECT_PID" 2>/dev/null || true
+    wait "$PID" "$DETECT_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 READY=0
 for _ in $(seq 1 60); do
-    if curl -fsS -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
+    if curl -fsS -m 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 &&
+       curl -fsS -m 2 "http://127.0.0.1:$DETECT_PORT/health" >/dev/null 2>&1; then
         READY=1
         break
     fi
-    if ! kill -0 "$PID" 2>/dev/null; then
+    if ! kill -0 "$PID" 2>/dev/null || ! kill -0 "$DETECT_PID" 2>/dev/null; then
         echo "服务没起来，日志："
-        cat "$LOG"
+        cat "$LOG" "$DETECT_LOG"
         exit 1
     fi
     sleep 0.5
 done
 if [ "$READY" -ne 1 ]; then
     echo "等了 30 秒 /health 还不通，日志："
-    cat "$LOG"
+    cat "$LOG" "$DETECT_LOG"
     exit 1
 fi
 
 set +e
-AT_E2E_BASE="http://127.0.0.1:$PORT" python3 scripts/e2e.py
+AT_E2E_BASE="http://127.0.0.1:$PORT" \
+AT_E2E_DETECT_BASE="http://127.0.0.1:$DETECT_PORT" \
+    python3 scripts/e2e.py
 STATUS=$?
 set -e
 
 if [ "$STATUS" -ne 0 ]; then
     echo
-    echo "▶ 服务日志"
+    echo "▶ 服务日志（默认配置）"
     cat "$LOG"
+    echo
+    echo "▶ 服务日志（AT_SOURCE_MODE=auto）"
+    cat "$DETECT_LOG"
 fi
 exit "$STATUS"

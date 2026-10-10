@@ -14,7 +14,7 @@ struct ConfigTests {
         #expect(c.maxHeaderBytes == 64 << 10)
         #expect(c.readTimeout == 30)
         #expect(c.logRequests)
-        #expect(c.sourceMode == .auto)
+        #expect(c.sourceMode == .english)
         #expect(c.translationStrategy == nil)
         #expect(c.strategyKey == "default")
     }
@@ -57,7 +57,7 @@ struct ConfigTests {
         #expect(c.maxBodyBytes == 1 << 20)
         #expect(c.maxHeaderBytes == 64 << 10)
         #expect(c.readTimeout == 30)
-        #expect(c.sourceMode == .auto)
+        #expect(c.sourceMode == .english)
         #expect(c.translationStrategy == nil)
         #expect(c.host == "127.0.0.1")
     }

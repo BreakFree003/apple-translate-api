@@ -55,7 +55,12 @@ struct Config: Sendable {
     /// 连接建好后等一个完整请求的秒数；0 = 不超时。只约束收请求，不约束翻译本身。
     var readTimeout: TimeInterval = 30
     /// 源语言策略，见 SourceMode。
-    var sourceMode: SourceMode = .auto
+    ///
+    /// 默认 `english`：绝大多数人的内容就是英文，而 `NLLanguageRecognizer` 会把英文短句
+    /// **自信地**判成别的语言（实测 `-m num, --max-count=num ...` → `pt 0.994`，英语 0.005），
+    /// 那些语言包没装就整条 400 —— 整页翻译时表现为「一片没翻出来」。不检测就没有这种意外。
+    /// 要看别的语种用 `auto`；多语种混杂用 `retry`（没装包才回退到 AT_DEFAULT_SOURCE）。
+    var sourceMode: SourceMode = .english
     /// 翻译策略；nil = 用框架默认（不显式指定）。
     var translationStrategy: TranslationStrategy?
 

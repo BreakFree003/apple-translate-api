@@ -115,7 +115,7 @@ apple-translate-server --help       # 全部环境变量与开关
 | `AT_MAX_BODY` | `1048576` | 单次请求正文字节上限（1 MiB）。按 `Content-Length` 就拦，不等收完 |
 | `AT_MAX_HEADERS` | `65536` | 请求头字节上限。头收全了也查，超了同样 431（不只防「不发 terminator」） |
 | `AT_READ_TIMEOUT` | `30` | 连接建好后等一个完整请求的秒数，`0` = 不超时。只约束收请求，不约束翻译 |
-| `AT_SOURCE_MODE` | `auto` | 源语言策略，见下 |
+| `AT_SOURCE_MODE` | `english` | 源语言策略，见下。默认**不检测**，一律按 `AT_DEFAULT_SOURCE` 翻 |
 | `AT_STRATEGY` | 不指定 | `lowLatency` / `highFidelity`（macOS 26.4+）。**实测 en→zh-Hans 上没差别**，见下 |
 
 ### `AT_SOURCE_MODE`：短句判错怎么办
@@ -130,11 +130,13 @@ pkcs12 PKCS#12 Data Management.                                    → pl 0.953
 
 那些语言包没装 → 整条请求 `400 language_not_installed`。置信度阈值救不了，因为它是**自信地判错**。
 
+**所以这一版把默认值改成了 `english`（不检测）** —— 上面这类误判就不会发生。三种模式的取舍：
+
 | 模式 | 行为 | 适合 |
 |---|---|---|
-| `auto` | 检测器说了算，判错就 400 | 真要区分语种 |
-| `english` | 除请求里显式指定的，一律当 `AT_DEFAULT_SOURCE` | 内容 99% 是英文、不想为判错买单 —— **整页翻译首选**，见「配置到沉浸式翻译」 |
-| `retry` | 先按检测结果试；**没装包**就用 `AT_DEFAULT_SOURCE` 再试一次 | 推荐（**代码默认仍是 `auto`**）：装了的语种照常识别，没装的不再白白失败。整页翻译务必用它，见「配置到沉浸式翻译」 |
+| `english` | 完全不检测，一律当 `AT_DEFAULT_SOURCE`（请求里显式指定的除外） | **默认值**。内容 99% 是英文 —— 整页翻译就是这种 |
+| `auto` | 检测器说了算，判错就 400 | 真要区分语种，宁可报错也不静默翻错 |
+| `retry` | 先按检测结果试；**没装包**就用 `AT_DEFAULT_SOURCE` 再试一次 | 多语种混杂：装了的语种照常识别，没装的不再白白失败。但英文短句被误判成**已装包**的语种时会静默翻错 |
 
 `retry` 实测：上面那 20 条原本必然 400 的句子，**20/20 都返回了正常译文**（日志里留下 `source pt has no pack, retrying as en`）。
 
@@ -237,10 +239,11 @@ print(client.chat.completions.create(
 
 几件要知道的事：
 
-- **先把 `AT_SOURCE_MODE` 设好**，别用默认的 `auto`。整页翻译几乎全是短句，而检测器会**自信地**把英文短句判成别的语言 —— 实测 `-m num, --max-count=num Stop reading the file after num matches.` 判成 `pt 0.994`（英语只有 0.005）。那个语言包没装 → 整条 400，页面上就是一片没翻出来。
-  - **内容 99% 是英文 → `AT_SOURCE_MODE=english`**：完全不做检测，一律按 `AT_DEFAULT_SOURCE`（默认 `en`）翻。确定、可预测，上面那类误判一律消失（实测：那句被判成 pt 的英文 → 200 正常翻出）。代价是正文里真的混进外语时会拿英语去翻它 —— 实测一段葡萄牙语基本原样返回（只换了标点），无用但不会翻成胡话。
-  - **多语种混杂 → `retry`**：先按检测结果试，检测到的语种没装包才回退到 en，比 `english` 聪明；但英文短句被误判成**已经装包**的语种时会静默翻错。这类句子实测 20/20 都能正常翻出来。
-  - 请求里显式给的 `source` 两者都不会覆盖（实测 `source: "ja"` 在 `english` 模式下照样按 ja 走，没装包就 400）。
+- **源语言默认就固定成英文**（`AT_SOURCE_MODE=english`，不做检测）—— 这个默认值就是为整页翻译设的。整页翻译几乎全是短句，而检测器会**自信地**把英文短句判成别的语言 —— 实测 `-m num, --max-count=num Stop reading the file after num matches.` 判成 `pt 0.994`（英语只有 0.005）。那个语言包没装 → 整条 400，页面上就是一片没翻出来。
+  - **要看别的语种 → `AT_SOURCE_MODE=auto`**：检测器说了算，判错就 400（会明确告诉你去装哪个语言包）。
+  - **多语种混杂 → `AT_SOURCE_MODE=retry`**：先按检测结果试，检测到的语种没装包才回退到 en，比 `english` 聪明；但英文短句被误判成**已经装包**的语种时会静默翻错。这类句子实测 20/20 都能正常翻出来。
+  - `english` 的代价：正文里真混进外语时会拿英语去翻它 —— 实测一段葡萄牙语基本原样返回（只换了标点），无用但不会翻成胡话。
+  - 请求里显式给的 `source` 三种模式都不会覆盖（实测 `source: "ja"` 在 `english` 模式下照样按 ja 走，没装包就 400）。
 - **地址要写全 `/v1/chat/completions`**，别只写 `http://127.0.0.1:8787`。旧版本扩展（Firefox 商店曾分发的 1.30.2）对只填主机名的写法会拼成 `/chat/completions`，直接 404；写全路径各版本都对。
 - **模型名填什么都行**：本服务不读请求里的 `model` 字段，响应里一律回 `AT_MODEL`。扩展爱发的 `temperature` / `max_tokens` / `top_p` 也一律忽略 —— JSON 里多出来的键不会让请求失败。
 - **目标语言是扩展写在 prompt 里、由本服务认出来的**（`Translate into Chinese…` / `翻译成中文：`），所以 `AT_DEFAULT_TARGET` 基本用不上。但扩展里选的目标语言如果本地**没装那个语言包**，会回 400 `language_not_installed`，装法见[语言包在哪装](#语言包在哪装)。
@@ -343,7 +346,7 @@ swift test -Xswiftc -plugin-path -Xswiftc "$(xcode-select -p)/usr/lib/swift/host
 
 （`AT_BIN=/opt/homebrew/bin/apple-translate-server ./scripts/e2e.sh` 可以改成验收 brew 装的那个二进制。）
 
-起一个真服务（独立端口 8791）、发真请求、翻真文本，24 项断言：接口形状、目标语言的可观测性质（日语必须有假名、中文必须有汉字且无假名）、指令切分、SSE、错误码、`openai` SDK 的非流式与流式调用。任一项失败非 0 退出并打印服务日志。
+起**两个**真服务 —— 默认配置的 8791，和显式开了 `AT_SOURCE_MODE=auto` 的 8792（后者专测源语言检测那两条断言）—— 发真请求、翻真文本，25 项断言：接口形状、默认固定英文、检测能力、目标语言的可观测性质（日语必须有假名、中文必须有汉字且无假名）、指令切分、SSE、错误码、`openai` SDK 的非流式与流式调用。任一项失败非 0 退出并打印两个服务的日志。
 
 依赖语言包的断言会**跟着系统实际状态走**：装了 `ja` 就要求翻出假名，没装就要求返回明确点名 `ja` 的 `400 language_not_installed` —— 两条路都不许静默翻错，也不会因为某台机器上删了包而假绿。
 
