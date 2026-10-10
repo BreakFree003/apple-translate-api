@@ -67,6 +67,9 @@ private struct HTTPHead {
     let headers: [String: String]
     /// body 在原始 Data 里的起点。
     let bodyStart: Int
+    /// `Content-Length` 出现了不止一次。RFC 要求这种请求直接拒掉 —— 后写的覆盖先写的
+    /// 是典型的请求走私口子。
+    let duplicateContentLength: Bool
 }
 
 enum HTTPParse {
@@ -95,7 +98,7 @@ enum HTTPParse {
         maxBodyBytes: Int = defaultMaxBodyBytes,
         maxHeaderBytes: Int = defaultMaxHeaderBytes
     ) -> Outcome {
-        guard let head = head(from: data) else {
+        guard let terminator = headerTerminator(in: data) else {
             // 头都没收全就已经超过上限 —— 不用再等了。
             if data.count > maxHeaderBytes {
                 return .rejected(Rejection(
@@ -105,6 +108,34 @@ enum HTTPParse {
                 ))
             }
             return .incomplete
+        }
+
+        // 头收全了也得看大小：不然一个「语法完全合法」的超大请求头照样能把内存拖爆。
+        guard terminator.bodyStart <= maxHeaderBytes else {
+            return .rejected(Rejection(
+                status: 431,
+                code: "headers_too_large",
+                message: "Request head is \(terminator.bodyStart) bytes; the limit is \(maxHeaderBytes). "
+                       + "Raise it with AT_MAX_HEADERS if you need to."
+            ))
+        }
+
+        // 头收全了却解不出来 —— 这是客户端发错了。回 400 明说，
+        // 别当成「还没收全」让它干等（带上大 body 时还会被上一条误判成 431）。
+        guard let head = head(from: data) else {
+            return .rejected(Rejection(
+                status: 400,
+                code: "invalid_request",
+                message: "Malformed HTTP request head."
+            ))
+        }
+
+        guard !head.duplicateContentLength else {
+            return .rejected(Rejection(
+                status: 400,
+                code: "invalid_content_length",
+                message: "Content-Length appeared more than once."
+            ))
         }
 
         // 分块传输我们不解码。与其把它当「空 body」报个看不懂的 invalid_request，
@@ -171,10 +202,12 @@ enum HTTPParse {
         guard parts.count >= 2 else { return nil }
 
         var headers: [String: String] = [:]
+        var duplicateContentLength = false
         for line in lines.dropFirst() where !line.isEmpty {
             guard let colon = line.firstIndex(of: ":") else { continue }
             let name = String(line[line.startIndex..<colon]).trimmingCharacters(in: .whitespaces).lowercased()
             let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+            if name == "content-length", headers[name] != nil { duplicateContentLength = true }
             headers[name] = value
         }
 
@@ -182,18 +215,29 @@ enum HTTPParse {
             method: parts[0].uppercased(),
             target: parts[1],
             headers: headers,
-            bodyStart: terminator.bodyStart
+            bodyStart: terminator.bodyStart,
+            duplicateContentLength: duplicateContentLength
         )
     }
 
     private static func headerTerminator(in data: Data) -> (headerEnd: Int, bodyStart: Int)? {
-        if let range = data.range(of: Data("\r\n\r\n".utf8)) {
-            return (range.lowerBound, range.upperBound)
+        let crlf = data.range(of: Data("\r\n\r\n".utf8))
+        let lf = data.range(of: Data("\n\n".utf8))
+        // 取**更靠前**的那个，不能优先认 CRLF：只发 \n 的客户端，其 body 里可能正好含
+        // `\r\n\r\n`（Markdown、CRLF 文本都有），优先认 CRLF 就会把终止符认到 body 里去，
+        // 于是这个请求永远凑不齐、一直挂到空闲超时。
+        switch (crlf, lf) {
+        case (nil, nil):
+            return nil
+        case (let found?, nil):
+            return (found.lowerBound, found.upperBound)
+        case (nil, let found?):
+            return (found.lowerBound, found.upperBound)
+        case (let a?, let b?):
+            return a.lowerBound <= b.lowerBound
+                ? (a.lowerBound, a.upperBound)
+                : (b.lowerBound, b.upperBound)
         }
-        if let range = data.range(of: Data("\n\n".utf8)) {
-            return (range.lowerBound, range.upperBound)
-        }
-        return nil
     }
 
     private static func splitTarget(_ target: String) -> (path: String, query: [String: String]) {

@@ -146,4 +146,64 @@ struct HTTPParseTests {
         #expect(request.header("content-length") == "0")
         #expect(request.header("Content-Length") == "0")
     }
+
+    @Test("头收全了但「合法地」超长：也要 431 —— 上限不是只防「不发 terminator」")
+    func rejectsOversizedCompleteHead() {
+        // 下面这坨语法完全正确，只是大。旧实现只在前一种情况下查上限，于是这条直接放行。
+        let big = "GET / HTTP/1.1\r\n"
+            + String(repeating: "X-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n", count: 100)
+            + "\r\n"
+        guard case .rejected(let rejection) = HTTPParse.parse(data(big), maxHeaderBytes: 1024) else {
+            Issue.record("收全了的超长头也该拒")
+            return
+        }
+        #expect(rejection.status == 431)
+        #expect(rejection.code == "headers_too_large")
+    }
+
+    @Test("畸形请求行 + 大 body：400，不许拿 body 的字节数误报 431")
+    func malformedHeadIsBadRequestNotTooLarge() {
+        // 坏请求行 + 200 KB body。旧实现数的是整个 buffer，于是报 431「请求头超限」。
+        let bad = "GARBAGE\r\n\r\n" + String(repeating: "x", count: 200_000)
+        guard case .rejected(let rejection) = HTTPParse.parse(data(bad)) else {
+            Issue.record("畸形头应该明确拒掉，而不是让客户端一直等")
+            return
+        }
+        #expect(rejection.status == 400)
+        #expect(rejection.code == "invalid_request")
+    }
+
+    @Test("重复的 Content-Length：400（RFC 要求，也是请求走私的经典口子）")
+    func rejectsDuplicateContentLength() {
+        let dup = "POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!"
+        guard case .rejected(let rejection) = HTTPParse.parse(data(dup)) else {
+            Issue.record("重复的 Content-Length 应该拒掉，不能后写的覆盖先写的")
+            return
+        }
+        #expect(rejection.status == 400)
+        #expect(rejection.code == "invalid_content_length")
+    }
+
+    @Test("只发 \\n 的头、而 body 里正好含 \\r\\n\\r\\n：终止符不能认到 body 里去")
+    func lfOnlyHeadersWithCRLFInsideBody() {
+        let body = "line one\r\n\r\nline two"   // Markdown、CRLF 文本里很常见
+        let raw = "POST /v1/translate HTTP/1.1\nContent-Length: \(body.utf8.count)\n\n" + body
+        guard case .complete(let request) = HTTPParse.parse(data(raw)) else {
+            Issue.record("认到 body 里的话这个请求永远凑不齐，会一直挂到空闲超时")
+            return
+        }
+        #expect(String(decoding: request.body, as: UTF8.self) == body)
+    }
+
+    @Test("头不是合法 UTF-8：400，而不是永远 incomplete")
+    func rejectsNonUTF8Head() {
+        var bytes = Data("POST / HTTP/1.1\r\nX-Bad: ".utf8)
+        bytes.append(contentsOf: [0xFF, 0xFE])
+        bytes.append(contentsOf: Data("\r\n\r\n".utf8))
+        guard case .rejected(let rejection) = HTTPParse.parse(bytes) else {
+            Issue.record("非 UTF-8 的头应该明确拒掉")
+            return
+        }
+        #expect(rejection.status == 400)
+    }
 }

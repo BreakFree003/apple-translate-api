@@ -57,20 +57,47 @@ struct TranslationOutcome: Sendable {
     let skipped: Bool
 }
 
+/// 一次只放一个任务过去的闸门（FIFO 排队）。
+///
+/// 为什么不能只靠 actor：**actor 在 `await` 处是可重入的** —— 两个任务可以先后进入同一个
+/// actor 方法，然后在里面那个 `await` 上同时挂着。所以「把 session 包进 actor 就等于串行」
+/// 是错的，这个错在本项目里真实存在过两轮（先是整个引擎一个 actor，后来是每个语言对一个
+/// actor，两次都没真的串行化）。要串行就得自己排队，这就是那个队。
+actor SerialGate {
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    /// 拿门。有人占着就挂起排队，先到先得。
+    func acquire() async {
+        if !busy {
+            busy = true
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    /// 还门。有人在排队就把门直接交给队首（`busy` 保持 true），否则空出来。
+    func release() {
+        if waiters.isEmpty {
+            busy = false
+        } else {
+            waiters.removeFirst().resume()
+        }
+    }
+}
+
 /// 一个 session 的串行化盒子。
 ///
-/// 框架要求同一个 `TranslationSession` 不能被并发调用，所以用 actor 把「同一个语言对」
-/// 的调用排成队。
+/// 框架要求同一个 `TranslationSession` 不能被并发调用；而 actor 的可重入性保证不了这件事，
+/// 所以这里用 `SerialGate` 显式排队。
 ///
 /// 别指望这能换来吞吐：实测系统框架内部自己就是串行的 —— 一条 12000 字的 en→zh-Hans
-/// 在飞的时候，另一个语言对（zh-Hans→en）的小请求照样要等满 5.4s；把原来的单一 actor
-/// 换成「每对一盒」并没有改变这个数字（对 HEAD 做同样的实验是 5.1s）。
-///
-/// 换来的不是速度，而是一个**真的**保证：原实现整个引擎只有一个 actor，而 actor 在
-/// `await` 处是可重入的 —— 「actor 串行化保证同一个 session 不会被并发调用」那句话
-/// 当时并不成立，四个并发请求确实会同时进同一个 session。现在它才成立。
+/// 在飞的时候，另一个语言对（zh-Hans→en）的小请求照样要等满 5.4s；连开两个进程各绑一个
+/// 端口也一样排队（短句从空载 0.06s 变成 2.92s）—— 串行点在系统共享的 `translationd` 里。
+/// 这里排队换来的不是速度，是「同一 session 不被并发调用」这个**真的**保证。
 actor SessionBox {
     private let session: TranslationSession
+    private let gate = SerialGate()
 
     init(session: TranslationSession) {
         self.session = session
@@ -81,11 +108,18 @@ actor SessionBox {
     }
 
     func translate(_ text: String) async throws -> RawTranslation {
-        let response = try await session.translate(text)
-        return RawTranslation(
-            sourceLanguage: response.sourceLanguage.minimalIdentifier,
-            targetText: response.targetText
-        )
+        await gate.acquire()
+        do {
+            let response = try await session.translate(text)
+            await gate.release()
+            return RawTranslation(
+                sourceLanguage: response.sourceLanguage.minimalIdentifier,
+                targetText: response.targetText
+            )
+        } catch {
+            await gate.release()   // 抛错也要还门，否则这个语言对从此卡死
+            throw error
+        }
     }
 }
 
