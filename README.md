@@ -99,8 +99,6 @@ print(client.chat.completions.create(
 ).choices[0].message.content)
 ```
 
-流式（SSE）与非流式都支持，`GET /health`、`GET /v1/models`、`GET /v1/languages` 用于探活和查询能力。
-
 ```bash
 apple-translate-server --version    # apple-translate-server 0.1.0
 apple-translate-server --help       # 全部环境变量与开关
@@ -171,20 +169,18 @@ Model:    apple-translate
 | `AT_MAX_BODY` | `1048576` | 单次请求正文字节上限（1 MiB）。按 `Content-Length` 就拦，不等收完 |
 | `AT_MAX_HEADERS` | `65536` | 请求头字节上限。头收全了也查，超了报 431 |
 | `AT_READ_TIMEOUT` | `30` | 连接建好后等一个完整请求的秒数，`0` = 不超时。只约束收请求，不约束翻译 |
-| `AT_SOURCE_MODE` | `english` | 源语言策略：`english` / `auto` / `retry`，见下 |
-| `AT_STRATEGY` | 不指定 | `lowLatency` / `highFidelity`（macOS 26.4+），见下 |
+| `AT_SOURCE_MODE` | `english` | 源语言策略，见下 |
+| `AT_STRATEGY` | 不指定 | `lowLatency` / `highFidelity`（macOS 26.4+）。en↔zh 上实测没差别，不用管 |
 
 ### `AT_SOURCE_MODE`：源语言怎么定
 
-`TranslationSession` 不接受 `auto`，源语言**必须自己判**。而系统检测器 `NLLanguageRecognizer` 在短句上会**自信地判错** —— 4324 条真实英文句子（man page 正文）里有 20 条（0.46%）被判成波兰语/葡萄牙语/印尼语等，好几句置信度 0.9 以上：
+框架不接受 `auto`，源语言**必须自己判**，而系统检测器在短句上会**自信地判错**：
 
 ```
--m num, --max-count=num Stop reading the file after num matches.   → pt 0.994
-pkcs12 PKCS#12 Data Management.                                    → pl 0.953
-72 Unknown TFTP transfer ID.                                        → id 0.919
+-m num, --max-count=num Stop reading the file after num matches.   → 判成 pt 0.994（英语 0.005）
 ```
 
-这些语言包没装 → 整条请求 `400 language_not_installed`。置信度阈值救不了，因为它是**自信地判错**；整页翻译时表现为「一大片没翻出来」。所以本服务的默认策略是**不检测**：
+葡萄牙语包没装 → 整条请求 `400 language_not_installed`；整页翻译时表现为「一大片没翻出来」。所以默认策略是**不检测**：
 
 | 模式 | 行为 | 适合 |
 |---|---|---|
@@ -192,21 +188,7 @@ pkcs12 PKCS#12 Data Management.                                    → pl 0.953
 | `auto` | 检测器说了算，判错就 400 | 真要区分语种，宁可报错也不静默翻错 |
 | `retry` | 先按检测结果试；**没装包**就用 `AT_DEFAULT_SOURCE` 再试一次 | 多语种混杂：装了的语种照常识别，没装的不再白白失败 |
 
-`retry` 实测：上面那 20 条原本必然 400 的句子，20/20 都返回了正常译文。
-
-两个诚实的补充：`english` 模式下正文真混进外语时会拿英语去翻它（实测一段葡萄牙语基本原样返回，**HTTP 200 而不是报错** —— 表现是「这段没翻」，不会翻成胡话）；`retry` 则在英文短句被误判成**已装包**的语种时会静默翻错。另外，检测本身几乎不花钱（`auto` 比 `english` 每条只多 0.7 ms），所以默认选 `english` 是为了**确定性**，不是为了快。
-
-### `AT_STRATEGY`：en→zh-Hans 上不需要它
-
-`TranslationSession.Strategy`（macOS 26.4+）有 `highFidelity` / `lowLatency` 两档，[hotchpotch/trn](https://github.com/hotchpotch/trn) 报告 low 档「约快 10 倍」。在本机对 **en→zh-Hans** 实测三档：
-
-| 策略 | 短句中位 | 2415 字符 | 译文 |
-|---|---|---|---|
-| 不指定（默认） | 23ms | 1253ms | 基准 |
-| `lowLatency` | 23ms | 1152ms | 与基准**逐字相同** |
-| `highFidelity` | 33ms | 1133ms | 与基准**逐字相同** |
-
-**没差别** —— 那条 10× 是 en→ja 的结论，en↔zh 走的不是同一条路径。开关留着备用，别指望它给中英提速。
+两个代价要知道：`english` 模式下正文真混进外语时会拿英语去翻它（表现是**这段没翻**，HTTP 200 原样返回，不会翻成胡话）；`retry` 则在英文短句被误判成**已装包**的语种时会静默翻错。
 
 ## 接口
 
@@ -231,50 +213,40 @@ pkcs12 PKCS#12 Data Management.                                    → pl 0.953
 
 正文取最后一条 user 消息：首行若是指令（`...into Japanese:` / `...翻译成中文：`），冒号之后才是正文，否则整条当正文；包裹正文的 ``` 围栏会被剥掉。语言名认 20 种写法（`ja` / `jp` / `Japanese` / `日本語` / `日语` / `日文` 都行），完整清单见 `GET /v1/languages`。
 
-`source` 只能自己给或由 `AT_SOURCE_MODE` 决定 —— 框架不接受 `auto`。检测走 `NLLanguageRecognizer`，另加了一层「不够自信时偏向 `AT_DEFAULT_SOURCE`」的裁决（置信度 ≥ 0.75 直接采信）。
-
 ## 语言包
 
-**服务不会替你下载语言包，也不能**（这个模式下 `canRequestDownloads == false`）。没装的语言对会明确返回 `400 language_not_installed`，并告诉你去哪儿装：
+**服务不会替你下载语言包，也不能**。没装的语言对会明确返回 `400 language_not_installed`，并告诉你去哪儿装：
 
 > 系统设置 → **通用 → 语言和地区 → 翻译语言**
 > （直接跳：`open x-apple.systempreferences:com.apple.Localization-Settings.extension`）
 
-**别拿资产目录判断装没装。** 那底下的 `com.apple.sequoia.asset.mt.bi-en-zh-ja-ko.<lang>.20` 是模型分片，删掉某个语言包之后它**还留在盘上**，会骗人。唯一可信的判据是框架自己报的状态：
+**别拿资产目录判断装没装**：那底下的模型分片在语言包删掉之后**还留在盘上**，会骗人。可信的判据是框架自己报的状态：
 
 ```bash
 curl -s "http://127.0.0.1:8787/v1/languages?source=en&target=ja" | jq -r .pair_status
 # installed（装了）/ supported（认得但没下载）/ unsupported（这对不支持）
 ```
 
-`GET /v1/languages` 不带参数时列出的 `system_supported` 是**平台能力**，不是本机装了什么。另外 `LanguageAvailability.status()` 冷启动不可信（第一次可能报 `supported`，紧接着就翻译成功），别拿它当闸门 —— 本服务的做法是直接翻，失败了再归类错误。
+`GET /v1/languages` 不带参数时列出的 `system_supported` 是**平台能力**，不是本机装了什么。
 
 ## 性能与限制
 
-- **延迟**：≈ `16 ms + 0.32 ms/字`（en→zh-Hans）：50 字 32 ms、500 字 176 ms、5000 字 1.73 s、10000 字 3.38 s。200 字以下是固定开销主导。首次调用偏慢（要 warm up），服务启动时会自己预热一次。
-- **并发是假的，排队是真的**：系统 `Translation` 框架内部就是串行的 —— 8 条并发发出 264 ms，而 8 条**串行**是 277 ms（加速比 1.05×）；N 从 1 到 32，req/s 恒定在 30 上下。**多开进程也没用**（实测两个进程各绑一个端口，大请求在飞时另一个进程上的短句从 0.06 s 变成 2.92 s）—— 串行点在系统共享的 `translationd` 里，不在本服务里。要做批量翻译就串行慢慢来，别堆并发。
+- **延迟**：约 `16 ms + 0.32 ms/字`（en→zh-Hans）：50 字 32 ms、500 字 176 ms、5000 字 1.73 s、10000 字 3.38 s。200 字以下主要是固定开销；首次调用偏慢（要 warm up），服务启动时会自己预热一次。
+- **并发是假的，排队是真的**：系统 `Translation` 框架内部就是串行的 —— 8 条并发发出 264 ms，而 8 条**串行**是 277 ms；N 从 1 到 32，req/s 恒定在 30 上下。**多开进程也没用**（实测两个进程各绑一个端口，大请求在飞时另一个进程上的短句从 0.06 s 变成 2.92 s）—— 串行点在系统共享的 `translationd` 里，不在本服务里。要批量翻译就串行慢慢来，别堆并发。
 - **一次连接一个请求**（`Connection: close`），没有 keep-alive 复用；连上不发的连接 30 秒会被踢掉（`AT_READ_TIMEOUT`）。
 - **请求体必须带 `Content-Length`**：chunked 明确返回 `411 length_required`（不会静默当成空 body）。
 - **只翻正文，不是通用对话模型**：system 提示只用来提取语言；`usage` 是按字符数估的假 token，别拿它算钱。
-- **延迟随长度近似线性**，但 2000 字以下的小请求差异不大；重复句子会被框架里的缓存/预测帮到，真实非重复语料比上表慢 12~14%。
 
 ### 资源占用
 
-`python3 scripts/bench.py` 对着正在跑的服务打，只读 `ps`，不侵入进程。实测（Mac mini M4 / 10 核 / 16 GB / macOS 27.0.1）：
-
 | 指标 | 实测 |
 |---|---|
-| 空载常驻内存 | ~20 MB |
-| 空载 CPU | 0.00% |
-| 打完 1000 条请求 | 19.9 → 19.7 MB，静置 30 秒再 −0.06 MB（没有增长，不是泄漏） |
-| 本进程每条请求 CPU | 4~6 ms |
-| 线程 / fd | 6 / 11，不随请求增长 |
+| 本服务空载常驻内存 / CPU | ~20 MB / 0.00% |
+| 本服务每条请求 CPU | 4~6 ms（线程 / fd：6 / 11，不随请求增长） |
 | 串行吞吐 | ~31 req/s（40 字正文） |
 | 冷启动 | exec 到 `/health` 能应答约 12 ms，首条翻译约 95 ms |
 
-**真正吃资源的不在这个进程里**：翻译运算跑在系统的 `translationd`，常驻 **~320~360 MB**，翻的时候基本吃满一个核（~0.32 ms/字）：500 字约 174 ms、10000 字约 3.4 s。它是全系统共享的守护进程（Safari、预览、查词也走它），不是本服务拉起来的 —— 想省这几百 MB 就只能不用系统的翻译框架。
-
-（上表在**非空闲**机器上取的，中位数，可重复性约 ±10%。）
+**真正吃资源的是系统的 `translationd`**（全系统共享，Safari、预览、查词也走它）：常驻 **~320~360 MB**，翻的时候基本吃满一个核，约 0.32 ms/字 —— 500 字约 174 ms、10000 字约 3.4 s。想省这几百 MB 就只能不用系统的翻译框架。
 
 ### 安全
 
@@ -286,7 +258,7 @@ curl -s "http://127.0.0.1:8787/v1/languages?source=en&target=ja" | jq -r .pair_s
 
 | 现象 | 原因 / 怎么办 |
 |---|---|
-| 400 `language_not_installed` | 语言包没装。装法见[语言包](#语言包)；消息里会点名是哪个语言对 |
+| 400 `language_not_installed` | 语言包没装，见[语言包](#语言包)；消息里会点名是哪个语言对 |
 | 400 `unsupported_target_language` / `unsupported_source_language` | 语言名不在支持的 20 种里，`GET /v1/languages` 有完整清单 |
 | 400 `unsupported_language_pair` | 框架不支持这一对语言 |
 | 400 `empty_input` | 没给正文 |
@@ -307,31 +279,7 @@ apple-translate-server --detect "The cat sat on the mat."
 # → en
 ```
 
-## 开发
-
-```bash
-./scripts/test.sh    # 40 个单测：HTTP 解析、串行闸门、prompt 切分、语言目录、配置解析（不碰翻译框架）
-./scripts/e2e.sh     # 端到端验收：起两个真服务、发真请求、翻真文本，25 项断言（需要语言包）
-```
-
-`./scripts/test.sh` 而不是裸 `swift test`：只装 CommandLineTools 的机器上，裸 `swift test` 的增量构建有时会在显式 module 的插件列表里漏掉 `TestingMacros`（报 `plugin for module 'TestingMacros' not found`，与本项目代码无关）；脚本会给编译器显式指定那个插件目录，4/4 稳定通过。
-
-e2e 依赖语言包的断言会**跟着系统实际状态走**：装了 `ja` 就要求翻出假名，没装就要求返回明确点名 `ja` 的 `400 language_not_installed` —— 两条路都不许静默翻错。CI（`.github/workflows/ci.yml`，`macos-26`）只跑构建 + 单测 + CLI 自检，不跑 e2e。
-
-发布流程：版本号只有 `Sources/AppleTranslateServer/Version.swift` 一处，改完提交后
-
-```bash
-./scripts/release.sh 0.1.0          # 干跑：查版本号/工作树/tag 冲突，跑构建和单测
-./scripts/release.sh 0.1.0 --go     # 打 tag → push → 抓 GitHub tarball 算 sha256 → 写进 formula
-```
-
-那个 `sha256` 只有 tag 推上去之后才算得出来，所以交给脚本，别手抄 —— 抄错了 brew 只会回一句 `SHA256 mismatch`。
-
-## 同类项目
-
-调研过 30+ 个仓库，最接近的是 [rock74710/TranslateML](https://github.com/rock74710/TranslateML)（同样只要求 macOS 26.0，同样走 `installedSource:`，也提供了 `/v1/chat/completions`）。完整对照、协议生态、各家踩过的坑见 [`docs/prior-art.md`](docs/prior-art.md)。
-
-一句话：**「Apple 端上翻译 → 本地 HTTP 服务」至少有 5 个人在做，但「OpenAI 方言 + 任意 source/target + 无 Xcode 的 SwiftPM CLI」这个组合目前只有这里。** 生态主流的接口其实是 DeepL / LibreTranslate / DLX，不是 OpenAI。
+想改代码或发版，见 [`docs/development.md`](docs/development.md)。
 
 ## 许可
 
