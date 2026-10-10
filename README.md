@@ -113,7 +113,7 @@ apple-translate-server --help       # 全部环境变量与开关
 | `AT_SMART_SKIP` | `1` | 正文已经是目标语言时原样返回，不翻 |
 | `AT_MAX_CHARS` | `20000` | 单次请求正文字符上限，超了报 413 |
 | `AT_MAX_BODY` | `1048576` | 单次请求正文字节上限（1 MiB）。按 `Content-Length` 就拦，不等收完 |
-| `AT_MAX_HEADERS` | `65536` | 请求头字节上限，防「一直发头不发 terminator」 |
+| `AT_MAX_HEADERS` | `65536` | 请求头字节上限。头收全了也查，超了同样 431（不只防「不发 terminator」） |
 | `AT_READ_TIMEOUT` | `30` | 连接建好后等一个完整请求的秒数，`0` = 不超时。只约束收请求，不约束翻译 |
 | `AT_SOURCE_MODE` | `auto` | 源语言策略，见下 |
 | `AT_STRATEGY` | 不指定 | `lowLatency` / `highFidelity`（macOS 26.4+）。**实测 en→zh-Hans 上没差别**，见下 |
@@ -269,8 +269,9 @@ print(client.chat.completions.create(
 - **并发是假的，排队是真的**：`Translation` 框架内部就是串行的 —— 一条 12000 字的 en→zh-Hans 在飞时，
   **另一个语言对**（zh-Hans→en）的小请求照样要等满 5.4s（对同一台机器上未改动的版本做对照实验是 5.1s）。
   所以上面那行「8 路并发 218ms」是把 8 条请求排着队跑完的总时间，不是 8 路并行。
-  服务端按语言对缓存 session 并把同一 session 的调用串行化，只是为了让「同一 session 不被并发调用」这件事成立，
-  **换不来吞吐**。**多开进程也没用**：实测两个进程各绑一个端口（`AT_PORT=8793` / `8794`），大请求在 A 上飞时，
+  服务端按语言对缓存 session，并用一把**显式的闸门**（`SerialGate`）把同一 session 的调用排成队 ——
+  注意这里不能只包一层 actor：actor 在 `await` 处是可重入的，「包个 actor 就等于串行」是错的
+  （这个错在本项目里真实存在过两轮）。排队**换不来吞吐**。**多开进程也没用**：实测两个进程各绑一个端口（`AT_PORT=8793` / `8794`），大请求在 A 上飞时，
   B 上的短句请求从空载 **0.06s** 变成 **2.92s** —— 串行点在系统共享的 `translationd` 里，不在本服务里。
   所以能做的只有「别堆并发、把请求切小」，真要吞吐只能等 Apple 改框架。
 - **一次连接一个请求**（`Connection: close`），没有 keep-alive 复用；连上不发的连接 30 秒会被踢掉（`AT_READ_TIMEOUT`）。

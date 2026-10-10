@@ -17,13 +17,26 @@ jobs:
       - name: 工具链信息
         run: swift --version && sw_vers
 
-      - name: 构建
-        run: swift build -c release
-
+      # 单测放在 release 构建**之前**：本机复现过「同一个 .build 里同时有 Debug 和
+      # Release 产物时，swift test 偶发报 `TestingMacros.TestDeclarationMacro could not
+      # be found`」（11 次尝试撞上 3 次，两种顺序都中过）。干净 build 目录上先跑 test
+      # 没失败过（2/2），所以这里按最稳的顺序排。
       - name: 单元测试（只测纯逻辑，不依赖语言包）
         run: swift test
+        env:
+          # SwiftPM 默认把 module cache 写到 ~/Library/Caches/org.swift.swiftpm，
+          # 那里在 CI 上是跨 run 共享的 —— 指到 workspace 里，各跑各的。
+          # （brew 公式里用同样的手法绕开构建 sandbox。）
+          SWIFTPM_MODULECACHE_OVERRIDE: ${{ github.workspace }}/.swiftpm-cache
+
+      - name: 构建
+        run: swift build -c release
+        env:
+          SWIFTPM_MODULECACHE_OVERRIDE: ${{ github.workspace }}/.swiftpm-cache
 
       - name: CLI 自检
+        env:
+          SWIFTPM_MODULECACHE_OVERRIDE: ${{ github.workspace }}/.swiftpm-cache
         run: |
           BIN="$(swift build -c release --show-bin-path)/apple-translate-server"
           "$BIN" --version

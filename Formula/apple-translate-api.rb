@@ -35,7 +35,9 @@ class AppleTranslateApi < Formula
     # 只关 SwiftPM 自己的 sandbox，关不掉 brew 外面那层）。
     ENV["SWIFTPM_MODULECACHE_OVERRIDE"] = buildpath/".swiftpm-cache"
 
-    # Homebrew 有现成的 Swift 构建参数（release + jobs，macOS 上还带 --disable-sandbox）。
+    # Homebrew 有现成的 Swift 构建参数（release + jobs）。macOS 的 std_swift_args 里已经
+    # 含 --disable-sandbox（extend/os/mac/formula.rb），后面那个是显式再写一遍 —— 冗余，
+    # 但能让「为什么能在这个 sandbox 里构建」一眼看懂，留着。
     system "swift", "build", *std_swift_args, "--disable-sandbox"
 
     # .build/release 是指向 out/Products/Release 的符号链接，两种写法都能取到。

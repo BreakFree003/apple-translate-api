@@ -53,7 +53,19 @@ echo "  origin = ${REMOTE:-（还没配）}"
 
 echo "▶ 构建 + 单测"
 swift build -c release
-swift test 2>&1 | grep -E 'Test run with' || true
+
+# 这里必须看 swift test 的**退出码**，不能只看输出里有没有 "Test run with" ——
+# 单测失败时那行也照样打得出来（"Test run with 32 tests ... failed"），
+# 于是红着也能一路 tag + push。
+TEST_STATUS=0
+TEST_LOG="$(swift test 2>&1)" || TEST_STATUS=$?
+echo "$TEST_LOG" | grep -E 'Test run with' || true
+if [ "$TEST_STATUS" -ne 0 ]; then
+    echo "✗ 单测没过，不发。失败摘要：" >&2
+    echo "$TEST_LOG" | grep -E 'error:|✘|failed' | head -20 >&2
+    echo "  完整输出：swift test" >&2
+    exit 1
+fi
 
 echo
 if [ "$GO" -ne 1 ]; then
@@ -85,8 +97,12 @@ echo "▶ 打 tag"
 git tag -a "$TAG" -m "apple-translate-api $VERSION"
 
 echo "▶ push"
-git push origin HEAD
-git push origin "$TAG"
+if ! git push origin HEAD || ! git push origin "$TAG"; then
+    # 留一个没推上去的本地 tag，重跑会被「tag 已存在」拦住，还得手工 git tag -d。
+    echo "✗ push 失败，把本地 tag 撤掉；代码没动，修完重跑即可" >&2
+    git tag -d "$TAG" >&2
+    exit 1
+fi
 
 echo "▶ 等 GitHub 生成 tarball 并算 sha256"
 SHA=""
