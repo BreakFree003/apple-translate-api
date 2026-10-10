@@ -18,7 +18,7 @@ class AppleTranslateApi < Formula
   #   url "https://github.com/BreakFree003/apple-translate-api/archive/refs/tags/v0.1.0.tar.gz"
   #   sha256 "<shasum -a 256 那个 tarball 的结果>"
   url "https://github.com/BreakFree003/apple-translate-api/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "34ef6a5ea570f8b466db3704edfc202e52edb5f66c8792d34a18610405a61d73"
   license "MIT"
   head "https://github.com/BreakFree003/apple-translate-api.git", branch: "main"
 
